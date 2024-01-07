@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 16.0.29201.188
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34414.90
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "BootTimeDiff", "BootTimeDiff\BootTimeDiff.csproj", "{34DEACB4-A424-44A0-9E63-2D66E2E35BEC}"
 EndProject
@@ -27,6 +27,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 	ProjectSection(SolutionItems) = preProject
 		README.md = README.md
 	EndProjectSection
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "FanNoiseSignal_Checker", "FanNoiseSignal_Checker\FanNoiseSignal_Checker.csproj", "{5D99C66E-1E7C-4317-B051-E84C0F9A9E8A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -74,6 +76,10 @@ Global
 		{3DD851B9-F417-4E7C-98B0-E5BB8F7F516F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{3DD851B9-F417-4E7C-98B0-E5BB8F7F516F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{3DD851B9-F417-4E7C-98B0-E5BB8F7F516F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5D99C66E-1E7C-4317-B051-E84C0F9A9E8A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5D99C66E-1E7C-4317-B051-E84C0F9A9E8A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5D99C66E-1E7C-4317-B051-E84C0F9A9E8A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5D99C66E-1E7C-4317-B051-E84C0F9A9E8A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
