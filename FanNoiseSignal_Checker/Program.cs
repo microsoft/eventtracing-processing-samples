@@ -1,9 +1,11 @@
+// © Microsoft Corporation. All rights reserved.
+
+using Microsoft.Windows.EventTracing;
+using System;
+using System.IO;
+
 namespace FanNoiseSignal_Checker
 {
-    using Microsoft.Windows.EventTracing;
-    using System;
-    using System.IO;
-
     internal class Program
     {
         private static void Main(string[] args)
@@ -14,15 +16,17 @@ namespace FanNoiseSignal_Checker
                 return;
             }
 
-            if (!string.Equals(Path.GetExtension(args[0]), ".etl", StringComparison.OrdinalIgnoreCase))
+            string filePath = args[0];
+
+            if (!File.Exists(filePath))
             {
-                Console.Error.WriteLine("Incorrect File! Please check the ETL file path again.");
+                Console.Error.WriteLine("File does not exist! Please check the file path again.");
                 return;
             }
 
             try
             {
-                ProcessFanNoiseSignal(Path.GetFullPath(args[0]));
+                ProcessFanNoiseSignal(filePath);
             }
             catch (Exception ex)
             {
@@ -35,12 +39,13 @@ namespace FanNoiseSignal_Checker
 
         private static void ProcessFanNoiseSignal(string filePath)
         {
-            var resultFilePath = Path.GetFullPath(@"FanNoiseSignal_Result"+ "_" + DateTime.Now.ToString("yyyyMMdd_HHmm") + ".txt");
+            string resultFilePath = Path.GetFullPath($"FanNoiseSignal_Result_{DateTime.Now:yyyyMMdd_HHmm}.txt");
 
-            using (var resultWriter = new StreamWriter(resultFilePath))
+            using (StreamWriter resultWriter = new StreamWriter(resultFilePath))
             {
                 var trace = TraceProcessor.Create(filePath);
-                var pendingGenericEvent = trace.UseGenericEvents();
+                Guid powerProviderGuid = new Guid("331C3B3A-2005-44C2-AC5E-77220C37D6B4"); // The GUID of Microsoft.Windows.Kernel.Power
+                var pendingGenericEvent = trace.UseGenericEvents(powerProviderGuid);
 
                 trace.Process();
 
@@ -51,12 +56,13 @@ namespace FanNoiseSignal_Checker
                 Console.WriteLine($"Trace Start Time: {traceStartTime}");
                 resultWriter.WriteLine($"Trace Start Time: {traceStartTime}");
                 Console.ResetColor();
+
                 var genericEventData = pendingGenericEvent.Result;
                 bool fandata = false;
 
                 foreach (var genericEvent in genericEventData.Events)
                 {
-                    if (genericEvent.ProviderName == @"Microsoft.Windows.Kernel.Power" && genericEvent.TaskName == @"PopFanUpdateSpeed_UpdatedNoiseLevel")
+                    if (genericEvent.TaskName == "PopFanUpdateSpeed_UpdatedNoiseLevel")
                     {
                         var timestamp = genericEvent.Timestamp.DateTimeOffset;
                         var oldFanNoiseLevel = genericEvent.Fields[1].AsInt32;
@@ -78,7 +84,6 @@ namespace FanNoiseSignal_Checker
                     Console.ResetColor();
                 }
             }
-
         }
     }
 }
