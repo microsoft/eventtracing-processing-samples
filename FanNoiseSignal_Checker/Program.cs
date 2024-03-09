@@ -1,8 +1,6 @@
 // © Microsoft Corporation. All rights reserved.
 
 using Microsoft.Windows.EventTracing;
-using System;
-using System.IO;
 
 namespace FanNoiseSignal_Checker
 {
@@ -45,7 +43,7 @@ namespace FanNoiseSignal_Checker
             {
                 ITraceProcessorSettings tps = new TraceProcessorSettings { AllowLostEvents = true };
                 var trace = TraceProcessor.Create(filePath, tps);
-                
+
                 var traceMetadata = trace.UseMetadata();
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine($"Trace Start Time: {traceMetadata.StartTime}");
@@ -53,15 +51,18 @@ namespace FanNoiseSignal_Checker
                 Console.ResetColor();
 
                 Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7");
-                var pendingGenericEvent = trace.UseGenericEvents(Microsoft_Windows_Kernel_Power);
+                var pendingKernelPowerEvent = trace.UseGenericEvents(Microsoft_Windows_Kernel_Power);
+
+
                 trace.Process();
-                if (pendingGenericEvent.HasResult == false)
+
+                if (pendingKernelPowerEvent.HasResult == false)
                 {
-                    Console.Error.WriteLine("No generic events found in the trace.");
+                    Console.Error.WriteLine(@"No Microsoft.Windows.Kernel.Power events found in the trace.");
                     return;
                 }
-                
-                var genericEventData = pendingGenericEvent.Result;
+
+                var genericEventData = pendingKernelPowerEvent.Result;
                 bool fandata = false;
 
                 foreach (var genericEvent in genericEventData.Events)
