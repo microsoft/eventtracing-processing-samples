@@ -6,6 +6,9 @@ namespace FanNoiseSignal_Checker
 {
     internal class Program
     {
+        private static readonly Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7");
+        private static readonly string UpdatedNoiseLevel = @"PopFanUpdateSpeed_UpdatedNoiseLevel";
+
         private static void Main(string[] args)
         {
             if (args.Length != 1)
@@ -50,9 +53,7 @@ namespace FanNoiseSignal_Checker
                 resultWriter.WriteLine($"Trace Start Time: {traceMetadata.StartTime}");
                 Console.ResetColor();
 
-                Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7");
                 var pendingKernelPowerEvent = trace.UseGenericEvents(Microsoft_Windows_Kernel_Power);
-
 
                 trace.Process();
 
@@ -67,7 +68,7 @@ namespace FanNoiseSignal_Checker
 
                 foreach (var genericEvent in genericEventData.Events)
                 {
-                    if (genericEvent.TaskName == @"PopFanUpdateSpeed_UpdatedNoiseLevel")
+                    if (genericEvent.TaskName == UpdatedNoiseLevel)
                     {
                         var timestamp = genericEvent.Timestamp.DateTimeOffset;
                         var oldFanNoiseLevel = genericEvent.Fields[1].AsInt32;
