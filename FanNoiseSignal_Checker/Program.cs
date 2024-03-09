@@ -43,26 +43,30 @@ namespace FanNoiseSignal_Checker
 
             using (StreamWriter resultWriter = new StreamWriter(resultFilePath))
             {
-                var trace = TraceProcessor.Create(filePath);
-                Guid powerProviderGuid = new Guid("331C3B3A-2005-44C2-AC5E-77220C37D6B4"); // The GUID of Microsoft.Windows.Kernel.Power
-                var pendingGenericEvent = trace.UseGenericEvents(powerProviderGuid);
-
-                trace.Process();
-
+                ITraceProcessorSettings tps = new TraceProcessorSettings { AllowLostEvents = true };
+                var trace = TraceProcessor.Create(filePath, tps);
+                
                 var traceMetadata = trace.UseMetadata();
-                var traceStartTime = traceMetadata.StartTime;
-
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"Trace Start Time: {traceStartTime}");
-                resultWriter.WriteLine($"Trace Start Time: {traceStartTime}");
+                Console.WriteLine($"Trace Start Time: {traceMetadata.StartTime}");
+                resultWriter.WriteLine($"Trace Start Time: {traceMetadata.StartTime}");
                 Console.ResetColor();
 
+                Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7");
+                var pendingGenericEvent = trace.UseGenericEvents(Microsoft_Windows_Kernel_Power);
+                trace.Process();
+                if (pendingGenericEvent.HasResult == false)
+                {
+                    Console.Error.WriteLine("No generic events found in the trace.");
+                    return;
+                }
+                
                 var genericEventData = pendingGenericEvent.Result;
                 bool fandata = false;
 
                 foreach (var genericEvent in genericEventData.Events)
                 {
-                    if (genericEvent.TaskName == "PopFanUpdateSpeed_UpdatedNoiseLevel")
+                    if (genericEvent.TaskName == @"PopFanUpdateSpeed_UpdatedNoiseLevel")
                     {
                         var timestamp = genericEvent.Timestamp.DateTimeOffset;
                         var oldFanNoiseLevel = genericEvent.Fields[1].AsInt32;
