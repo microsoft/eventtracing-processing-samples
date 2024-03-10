@@ -6,6 +6,9 @@ namespace FanNoiseSignal_Checker
 {
     internal class Program
     {
+        private static readonly Guid Microsoft_Windows_Kernel_Acpi = Guid.Parse("c514638f-7723-485b-bcfc-96565d735d4a"); // Microsoft-Windows-Kernel-Acpi provider GUID
+        private static readonly string FanStatusChange = @"FanStatusChange";
+
         private static readonly Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7"); // Microsoft-Windows-Kernel-Power provider GUID
         private static readonly string UpdatedNoiseLevel = @"PopFanUpdateSpeed_UpdatedNoiseLevel";
         private static readonly string TripPoint = @"PopFanUpdateSpeed_TripPoint";
@@ -51,8 +54,8 @@ namespace FanNoiseSignal_Checker
                 var traceMetadata = trace.UseMetadata();
                 WriteResult(resultWriter, $"Trace Start Time:\t{traceMetadata.StartTime}", ConsoleColor.Yellow);
                 WriteResult(resultWriter, "");
-                        
-                var pendingKernelPowerEvent = trace.UseGenericEvents(Microsoft_Windows_Kernel_Power);
+
+                var pendingKernelPowerEvent = trace.UseGenericEvents(new Guid[] { Microsoft_Windows_Kernel_Acpi, Microsoft_Windows_Kernel_Power });
 
                 trace.Process();
 
@@ -67,7 +70,16 @@ namespace FanNoiseSignal_Checker
 
                 foreach (var genericEvent in genericEventData.Events)
                 {
-                    if (genericEvent.TaskName == UpdatedNoiseLevel)
+                    if (genericEvent.TaskName == FanStatusChange)
+                    {
+                        var timestamp = genericEvent.Timestamp.DateTimeOffset;
+                        var fanBiosName = genericEvent.Fields[1].AsString;
+                        var control = genericEvent.Fields[2].AsUInt32;
+                        var speed = genericEvent.Fields[3].AsUInt32;
+
+                        WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: FanBiosName: {fanBiosName}, Control: {control}, Speed: {speed}", ConsoleColor.Blue);
+                    }
+                    else if (genericEvent.TaskName == UpdatedNoiseLevel)
                     {
                         var timestamp = genericEvent.Timestamp.DateTimeOffset;
                         var oldFanNoiseLevel = genericEvent.Fields[1].AsInt32;
@@ -84,8 +96,7 @@ namespace FanNoiseSignal_Checker
 
                         WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint} (0x{lowTripPoint:X}), HighTripPoint: {highTripPoint} (0x{highTripPoint:X})", ConsoleColor.Cyan);
                         WriteResult(resultWriter, "");
-                        fandata = true;
-                    }   
+                    }
                 }
 
                 if (!fandata)
