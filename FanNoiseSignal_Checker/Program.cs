@@ -50,7 +50,8 @@ namespace FanNoiseSignal_Checker
 
                 var traceMetadata = trace.UseMetadata();
                 WriteResult(resultWriter, $"Trace Start Time:\t{traceMetadata.StartTime}", ConsoleColor.Yellow);
-
+                WriteResult(resultWriter, "");
+                        
                 var pendingKernelPowerEvent = trace.UseGenericEvents(Microsoft_Windows_Kernel_Power);
 
                 trace.Process();
@@ -82,7 +83,7 @@ namespace FanNoiseSignal_Checker
                         var highTripPoint = genericEvent.Fields[2].AsUInt32;
 
                         WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint}, HighTripPoint: {highTripPoint}", ConsoleColor.Cyan);
-                        Console.WriteLine();
+                        WriteResult(resultWriter, "");
                         fandata = true;
                     }   
                 }
@@ -94,7 +95,7 @@ namespace FanNoiseSignal_Checker
             }
         }
 
-        private static void WriteResult(StreamWriter writer, string message, ConsoleColor color)
+        private static void WriteResult(StreamWriter writer, string message, ConsoleColor color = ConsoleColor.White)
         {
             Console.ForegroundColor = color;
             Console.WriteLine(message);
