@@ -6,12 +6,15 @@ namespace FanNoiseSignal_Checker
 {
     internal class Program
     {
-        private static readonly Guid Microsoft_Windows_Kernel_Acpi = Guid.Parse("c514638f-7723-485b-bcfc-96565d735d4a"); // Microsoft-Windows-Kernel-Acpi provider GUID
+        // Microsoft-Windows-Kernel-Acpi provider GUID
+        private static readonly Guid Microsoft_Windows_Kernel_Acpi = Guid.Parse("c514638f-7723-485b-bcfc-96565d735d4a"); 
         private static readonly string FanStatusChange = @"FanStatusChange";
 
-        private static readonly Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7"); // Microsoft-Windows-Kernel-Power provider GUID
+        // Microsoft.Windows.Kernel.Power provider GUID
+        private static readonly Guid Microsoft_Windows_Kernel_Power = Guid.Parse("63bca7a1-77ec-4ea7-95d0-98d3f0c0ebf7"); 
         private static readonly string UpdatedNoiseLevel = @"PopFanUpdateSpeed_UpdatedNoiseLevel";
         private static readonly string TripPoint = @"PopFanUpdateSpeed_TripPoint";
+        private static readonly string NoiseImpactSupport = @"PopFanUpdateSpeed_Done";
 
         private static void Main(string[] args)
         {
@@ -55,18 +58,19 @@ namespace FanNoiseSignal_Checker
                 WriteResult(resultWriter, $"Trace Start Time:\t{traceMetadata.StartTime}", ConsoleColor.Yellow);
                 WriteResult(resultWriter, "");
 
-                var pendingKernelPowerEvent = trace.UseGenericEvents(new Guid[] { Microsoft_Windows_Kernel_Acpi, Microsoft_Windows_Kernel_Power });
+                var pendingGenericEvent = trace.UseGenericEvents(new Guid[] { Microsoft_Windows_Kernel_Acpi, Microsoft_Windows_Kernel_Power });
 
                 trace.Process();
 
-                if (pendingKernelPowerEvent.HasResult == false)
+                if (pendingGenericEvent.HasResult == false)
                 {
-                    WriteResult(resultWriter, @"No Microsoft.Windows.Kernel.Power events found in the trace.", ConsoleColor.Red);
+                    WriteResult(resultWriter, @"No Microsoft.Windows.Kernel.Power events or Microsoft-Windows-Kernel-Acpi events found in the trace.", ConsoleColor.Red);
                     return;
                 }
 
-                var genericEventData = pendingKernelPowerEvent.Result;
-                bool fandata = false;
+                var genericEventData = pendingGenericEvent.Result;
+                bool fanNoiseSignalLevelChanged = false;
+                bool noiseImpactSupport = false;
 
                 foreach (var genericEvent in genericEventData.Events)
                 {
@@ -86,7 +90,7 @@ namespace FanNoiseSignal_Checker
                         var newFanNoiseLevel = genericEvent.Fields[2].AsInt32;
 
                         WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: OldFanNoiseLevel: {oldFanNoiseLevel}, NewFanNoiseLevel: {newFanNoiseLevel}", ConsoleColor.Green);
-                        fandata = true;
+                        fanNoiseSignalLevelChanged = true;
                     }
                     else if (genericEvent.TaskName == TripPoint)
                     {
@@ -97,11 +101,20 @@ namespace FanNoiseSignal_Checker
                         WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint} (0x{lowTripPoint:X}), HighTripPoint: {highTripPoint} (0x{highTripPoint:X})", ConsoleColor.Cyan);
                         WriteResult(resultWriter, "");
                     }
+                    else if (genericEvent.TaskName == NoiseImpactSupport)
+                    {
+                        noiseImpactSupport = genericEvent.Fields[2].AsBoolean;
+                    }
                 }
 
-                if (!fandata)
+                if (!fanNoiseSignalLevelChanged)
                 {
                     WriteResult(resultWriter, "There is no Fan Noise Signal level change.", ConsoleColor.Red);
+                }
+
+                if (!noiseImpactSupport)
+                {
+                    WriteResult(resultWriter, "There is no Noise Impact Support.", ConsoleColor.Red);
                 }
             }
         }
