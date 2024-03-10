@@ -70,7 +70,7 @@ namespace FanNoiseSignal_Checker
 
                 var genericEventData = pendingGenericEvent.Result;
                 bool fanNoiseSignalLevelChanged = false;
-                bool noiseImpactSupport = false;
+                bool noiseImpactSupport = true;
 
                 foreach (var genericEvent in genericEventData.Events)
                 {
