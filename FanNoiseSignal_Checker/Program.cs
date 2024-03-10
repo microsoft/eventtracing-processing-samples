@@ -82,7 +82,7 @@ namespace FanNoiseSignal_Checker
                         var lowTripPoint = genericEvent.Fields[1].AsUInt32;
                         var highTripPoint = genericEvent.Fields[2].AsUInt32;
 
-                        WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint}, HighTripPoint: {highTripPoint}", ConsoleColor.Cyan);
+                        WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint} (0x{lowTripPoint:X}), HighTripPoint: {highTripPoint} (0x{highTripPoint:X})", ConsoleColor.Cyan);
                         WriteResult(resultWriter, "");
                         fandata = true;
                     }   
