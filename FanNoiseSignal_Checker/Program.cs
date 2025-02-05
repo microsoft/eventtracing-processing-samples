@@ -1,6 +1,9 @@
 // © Microsoft Corporation. All rights reserved.
 
 using Microsoft.Windows.EventTracing;
+using System;
+using System.IO;
+using System.Linq;
 
 namespace FanNoiseSignal_Checker
 {
@@ -52,7 +55,7 @@ namespace FanNoiseSignal_Checker
             using var resultWriter = new StreamWriter(resultFilePath);
 
             ITraceProcessorSettings tps = new TraceProcessorSettings { AllowLostEvents = true };
-            using var trace = TraceProcessor.Create(filePath, tps);
+            using var trace = new TraceProcessorBuilder().WithSettings(tps).Build(filePath);
 
             var traceMetadata = trace.UseMetadata();
             WriteResult(resultWriter, $"Trace Start Time:\t{traceMetadata.StartTime}", ConsoleColor.Yellow);
@@ -76,34 +79,34 @@ namespace FanNoiseSignal_Checker
             {
                 if (genericEvent.TaskName == FanStatusChange)
                 {
-                    var timestamp = genericEvent.Timestamp.DateTimeOffset;
-                    var fanBiosName = genericEvent.Fields[1].AsString;
-                    var control = genericEvent.Fields[2].AsUInt32;
-                    var speed = genericEvent.Fields[3].AsUInt32;
+                    var timestamp = genericEvent.Timestamp.GetDateTimeOffset(traceMetadata);
+                    var fanBiosName = genericEvent.Fields.Values.ElementAt(1).AsString;
+                    var control = genericEvent.Fields.Values.ElementAt(2).AsUInt32;
+                    var speed = genericEvent.Fields.Values.ElementAt(3).AsUInt32;
 
                     WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: FanBiosName: {fanBiosName}, Control: {control}, Speed: {speed}", ConsoleColor.Blue);
                 }
                 else if (genericEvent.TaskName == UpdatedNoiseLevel)
                 {
-                    var timestamp = genericEvent.Timestamp.DateTimeOffset;
-                    var oldFanNoiseLevel = genericEvent.Fields[1].AsInt32;
-                    var newFanNoiseLevel = genericEvent.Fields[2].AsInt32;
+                    var timestamp = genericEvent.Timestamp.GetDateTimeOffset(traceMetadata);
+                    var oldFanNoiseLevel = genericEvent.Fields.Values.ElementAt(1).AsInt32;
+                    var newFanNoiseLevel = genericEvent.Fields.Values.ElementAt(2).AsInt32;
 
                     WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: OldFanNoiseLevel: {oldFanNoiseLevel}, NewFanNoiseLevel: {newFanNoiseLevel}", ConsoleColor.Green);
                     fanNoiseSignalLevelChanged = true;
                 }
                 else if (genericEvent.TaskName == TripPoint)
                 {
-                    var timestamp = genericEvent.Timestamp.DateTimeOffset;
-                    var lowTripPoint = genericEvent.Fields[1].AsUInt32;
-                    var highTripPoint = genericEvent.Fields[2].AsUInt32;
+                    var timestamp = genericEvent.Timestamp.GetDateTimeOffset(traceMetadata);
+                    var lowTripPoint = genericEvent.Fields.Values.ElementAt(1).AsUInt32;
+                    var highTripPoint = genericEvent.Fields.Values.ElementAt(2).AsUInt32;
 
                     WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint} (0x{lowTripPoint:X}), HighTripPoint: {highTripPoint} (0x{highTripPoint:X})", ConsoleColor.Cyan);
                     WriteResult(resultWriter, "");
                 }
                 else if (genericEvent.TaskName == NoiseImpactSupport)
                 {
-                    noiseImpactSupport = genericEvent.Fields[2].AsBoolean;
+                    noiseImpactSupport = genericEvent.Fields.Values.ElementAt(2).AsBoolean;
                 }
             }
 

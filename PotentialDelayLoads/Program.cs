@@ -26,7 +26,7 @@ namespace StackHitTime
                 AllowLostEvents = true,
             };
 
-            using (ITraceProcessor trace = TraceProcessor.Create(tracePath, settings))
+            using (ITraceProcessor trace = new TraceProcessorBuilder().WithSettings(settings).Build(tracePath))
             {
                 IPendingResult<IReferenceSetDataSource> pendingReferenceSet = trace.UseReferenceSetData();
                 IPendingResult<IProcessDataSource> pendingProcesses = trace.UseProcesses();
@@ -206,8 +206,8 @@ namespace StackHitTime
                 {
                     foreach (var frame in page.AccessingStack.Frames)
                     {
-                        var frameImage = frame?.Image?.FileName;
-                        var frameFunction = frame?.Symbol?.FunctionName;
+                        var frameImage = frame.Image?.FileName;
+                        var frameFunction = frame.Symbol?.FunctionName;
 
                         if (frameImage != null &&
                             frameImage.Contains("ntdll") &&
@@ -239,7 +239,7 @@ namespace StackHitTime
                 //
                 if (accessedPage?.Page != null)
                 {
-                    ulong offset = accessedPage?.Page?.FileOffset ?? 0;
+                    long offset = accessedPage?.Page?.FileOffset ?? 0;
 
                     if (offset == 0)
                     {

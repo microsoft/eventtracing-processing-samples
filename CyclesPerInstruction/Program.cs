@@ -20,7 +20,7 @@ public static class Program
 
         TraceProcessorSettings settings = new TraceProcessorSettings { AllowLostEvents = true };
 
-        using (ITraceProcessor trace = TraceProcessor.Create(tracePath, settings))
+        using (ITraceProcessor trace = new TraceProcessorBuilder().WithSettings(settings).Build(tracePath))
         {
             IPendingResult<IProcessorCounterDataSource> pendingCounterData = trace.UseProcessorCounters();
 

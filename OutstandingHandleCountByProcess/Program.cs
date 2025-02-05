@@ -18,7 +18,7 @@ public static class Program
         string tracePath = args[0];
         TraceProcessorSettings settings = new TraceProcessorSettings { AllowLostEvents = true };
 
-        using (ITraceProcessor trace = TraceProcessor.Create(tracePath, settings))
+        using (ITraceProcessor trace = new TraceProcessorBuilder().WithSettings(settings).Build(tracePath))
         {
             IPendingResult<IHandleDataSource> pendingHandleData = trace.UseHandles();
             

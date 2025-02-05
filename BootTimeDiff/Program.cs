@@ -29,13 +29,14 @@ class Program
         using (ITraceProcessor trace = TraceProcessor.Create(tracePath))
         {
             // Microsoft-Windows-Shell-Core
-            trace.Use(new Guid[] { new Guid("30336ed4-e327-447c-9de0-51b652c86108") }, e =>
+            trace.UseStreaming().UseUnparsedEvents(e =>
             {
                 // PerfTrack_Explorer_ExplorerStartToDesktopReady
                 if (e.Id != 27231) return;
 
                 result = e.Timestamp;
-            });
+            },
+            new Guid("30336ed4-e327-447c-9de0-51b652c86108"));
 
             trace.Process();
         }
