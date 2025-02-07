@@ -80,17 +80,17 @@ namespace FanNoiseSignal_Checker
                 if (genericEvent.TaskName == FanStatusChange)
                 {
                     var timestamp = genericEvent.Timestamp.GetDateTimeOffset(traceMetadata);
-                    var fanBiosName = genericEvent.Fields.Values.ElementAt(1).AsString;
-                    var control = genericEvent.Fields.Values.ElementAt(2).AsUInt32;
-                    var speed = genericEvent.Fields.Values.ElementAt(3).AsUInt32;
+                    var fanBiosName = genericEvent.Fields["FanBiosName"].AsString;
+                    var control = genericEvent.Fields["Control"].AsUInt32;
+                    var speed = genericEvent.Fields["Speed"].AsUInt32;
 
                     WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: FanBiosName: {fanBiosName}, Control: {control}, Speed: {speed}", ConsoleColor.Blue);
                 }
                 else if (genericEvent.TaskName == UpdatedNoiseLevel)
                 {
                     var timestamp = genericEvent.Timestamp.GetDateTimeOffset(traceMetadata);
-                    var oldFanNoiseLevel = genericEvent.Fields.Values.ElementAt(1).AsInt32;
-                    var newFanNoiseLevel = genericEvent.Fields.Values.ElementAt(2).AsInt32;
+                    var oldFanNoiseLevel = genericEvent.Fields["OldFanNoiseLevel"].AsInt32;
+                    var newFanNoiseLevel = genericEvent.Fields["NewFanNoiseLevel"].AsInt32;
 
                     WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: OldFanNoiseLevel: {oldFanNoiseLevel}, NewFanNoiseLevel: {newFanNoiseLevel}", ConsoleColor.Green);
                     fanNoiseSignalLevelChanged = true;
@@ -98,15 +98,15 @@ namespace FanNoiseSignal_Checker
                 else if (genericEvent.TaskName == TripPoint)
                 {
                     var timestamp = genericEvent.Timestamp.GetDateTimeOffset(traceMetadata);
-                    var lowTripPoint = genericEvent.Fields.Values.ElementAt(1).AsUInt32;
-                    var highTripPoint = genericEvent.Fields.Values.ElementAt(2).AsUInt32;
+                    var lowTripPoint = genericEvent.Fields["LowTripPoint"].AsUInt32;
+                    var highTripPoint = genericEvent.Fields["HighTripPoint"].AsUInt32;
 
                     WriteResult(resultWriter, $"Log Time:\t\t{timestamp}: LowTripPoint: {lowTripPoint} (0x{lowTripPoint:X}), HighTripPoint: {highTripPoint} (0x{highTripPoint:X})", ConsoleColor.Cyan);
                     WriteResult(resultWriter, "");
                 }
                 else if (genericEvent.TaskName == NoiseImpactSupport)
                 {
-                    noiseImpactSupport = genericEvent.Fields.Values.ElementAt(2).AsBoolean;
+                    noiseImpactSupport = genericEvent.Fields["NoiseImpactSupport"].AsBoolean;
                 }
             }
 
