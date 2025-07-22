@@ -4,6 +4,6 @@
 		<TargetFramework>net8.0</TargetFramework>
 	</PropertyGroup>
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Windows.EventTracing" Version="2.0.553-preview.gf74d3a9049" />
+		<PackageReference Include="Microsoft.Windows.EventTracing" Version="2.0.679-preview" />
 	</ItemGroup>
 </Project>

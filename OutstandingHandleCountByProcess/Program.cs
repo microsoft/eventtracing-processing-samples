@@ -4,6 +4,7 @@ using Microsoft.Windows.EventTracing;
 using Microsoft.Windows.EventTracing.Memory;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 public static class Program
 {
@@ -48,7 +49,7 @@ public static class Program
                 }
             }
 
-            foreach (IHandle otherHandle in handleData.OtherHandles)
+            foreach (IHandle otherHandle in handleData.AllHandles.Where(x => !StringComparer.Ordinal.Equals("Process", x.Type)))
             {
                 if (!otherHandle.CloseTime.HasValue)
                 {
