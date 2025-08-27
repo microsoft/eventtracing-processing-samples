@@ -22,6 +22,10 @@ The samples are organized into two main folders:
 
 Each sample project folder contains its own readme detailing what it does and how it can be run.
 
+## Migration Guide
+
+If you're looking to migrate from version 1 to version 2 of the EventTracing packages, see the [EventTracing v1 to v2 Migration Guide](./EventTracing%20v1%20to%20v2%20Migration%20Guide.md) for detailed information on the changes and migration steps.
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
