@@ -35,7 +35,8 @@ namespace MemoryUsageChecker
         private static int Main(string[] args)
         {
             string tracePath = null;
-            int topN = 10;
+            int topN = 30;
+            int topStacks = 10;
             double minDisplayMb = 2.0;
             string symbolsOverride = null;
             bool noSymbols = false;
@@ -49,6 +50,17 @@ namespace MemoryUsageChecker
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
                         Console.Error.WriteLine("--top requires a positive integer.");
+                        Console.ResetColor();
+                        WaitForKeyIfInteractive();
+                        return 1;
+                    }
+                }
+                else if (a == "--top-stacks" && i + 1 < args.Length)
+                {
+                    if (!int.TryParse(args[++i], out topStacks) || topStacks < 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine("--top-stacks requires a non-negative integer (0 disables all per-row stack dumps).");
                         Console.ResetColor();
                         WaitForKeyIfInteractive();
                         return 1;
@@ -132,6 +144,10 @@ namespace MemoryUsageChecker
             // shape so two captures can be A/B compared by AI / scripts
             // without re-parsing colored text or re-opening the raw ETL.
             string jsonPath = Path.GetFullPath($"MemoryUsage_Result_{timestamp}.json");
+            // The summary file is a tiny plain-text companion (~30 lines)
+            // containing only the executive summary block, intended for
+            // direct paste into bug reports.
+            string summaryPath = Path.GetFullPath($"MemoryUsage_Summary_{timestamp}.txt");
 
             // Open the diagnostic log FIRST so even a failure inside the
             // OutputWriter constructor or TraceProcessorBuilder lands in the log.
@@ -143,6 +159,7 @@ namespace MemoryUsageChecker
             Log.Info($"Working directory: {Environment.CurrentDirectory}");
             Log.Info($"Args             : {string.Join(" ", args)}");
             Log.Info($"Parsed --top     : {topN}");
+            Log.Info($"Parsed --top-stacks : {topStacks}");
             Log.Info($"Parsed --min-display-mb : {minDisplayMb:F2}");
             Log.Info($"Parsed --symbols : {symbolsOverride ?? "(not specified)"}");
             Log.Info($"Parsed --no-symbols: {noSymbols}");
@@ -179,7 +196,9 @@ namespace MemoryUsageChecker
                 using var output = new OutputWriter(resultPath)
                 {
                     TopN = topN,
-                    MinDisplayBytes = (long)(minDisplayMb * 1024 * 1024)
+                    TopStacks = topStacks,
+                    MinDisplayBytes = (long)(minDisplayMb * 1024 * 1024),
+                    NoSymbols = noSymbols
                 };
 
                 ITraceProcessorSettings settings = new TraceProcessorSettings { AllowLostEvents = true };
@@ -234,6 +253,9 @@ namespace MemoryUsageChecker
                     output.WriteHeader($"Result File:\t{resultPath}");
                     output.WriteHeader($"Diagnostic Log:\t{logPath}");
                     output.WriteHeader($"JSON Sidecar:\t{jsonPath}");
+                    output.WriteHeader($"Summary File:\t{summaryPath}");
+                    output.WriteBlank();
+                    output.WriteNotable("=> The 'EXECUTIVE SUMMARY' section at the end of this file (and the standalone Summary File above) lists the top actionable findings. The per-exercise detail follows below.");
                     output.WriteBlank();
 
                     LoadSymbols(output, pendingSymbols, symbolsOverride, noSymbols, jsonReport);
@@ -247,6 +269,16 @@ namespace MemoryUsageChecker
 
                     RunExercise(output, "Exercise 3", () => Exercise3_Pool.Run(output, metadata, pendingProcesses, pendingPool, pendingResidentSet, jsonReport));
                     output.WriteBlank();
+
+                    // Executive summary: a short, scannable digest of the
+                    // most actionable findings across all three exercises.
+                    // Rendered as a section at the end of the result file so
+                    // the user only has to scroll to the bottom (or jump to
+                    // the EXECUTIVE SUMMARY banner) to see the punchline,
+                    // and also persisted as a tiny companion *.summary.txt
+                    // file that can be pasted into bug reports.
+                    ExecutiveSummary.WriteToOutputAndFile(output, jsonReport, summaryPath);
+                    Log.Info($"Executive summary written: {summaryPath}");
                 }
 
                 // Persist the JSON sidecar AFTER the trace has been disposed
@@ -493,7 +525,7 @@ namespace MemoryUsageChecker
         /// <summary>Prints a one-line usage banner to stderr.</summary>
         private static void PrintUsage()
         {
-            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--top N] [--min-display-mb V] [--symbols <path>] [--no-symbols]");
+            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--top N] [--top-stacks N] [--min-display-mb V] [--symbols <path>] [--no-symbols]");
             Console.Error.WriteLine();
             Console.Error.WriteLine("When <trace.etl> is omitted (e.g. when MemoryUsageChecker.exe is launched");
             Console.Error.WriteLine("by double-clicking it in Explorer), the tool auto-selects the most recently");
@@ -501,11 +533,18 @@ namespace MemoryUsageChecker
             Console.Error.WriteLine("MemoryUsage-Trace.etl (the canonical name produced by MemoryUsageTrace.cmd).");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --top N             Show up to N rows in each outer Top-N table (default 10).");
-            Console.Error.WriteLine("  --min-display-mb V  Hide inner Top-K bucket / stack rows below V MiB (default 2;");
-            Console.Error.WriteLine("                      pass 0 to disable filtering and show every row).");
+            Console.Error.WriteLine("  --top N             Show up to N rows in each outer Top-N table (default 30).");
+            Console.Error.WriteLine("  --top-stacks N      Show the per-row inner stack drill-down only for the first");
+            Console.Error.WriteLine("                      N outer rows (default 10; 0 disables all per-row stack dumps).");
+            Console.Error.WriteLine("                      The outer Top-N table still lists up to --top entries.");
+            Console.Error.WriteLine("  --min-display-mb V  Hide rows below V MiB in BOTH outer Top-N tables AND inner");
+            Console.Error.WriteLine("                      Top-K bucket / stack rows (default 2; pass 0 to disable");
+            Console.Error.WriteLine("                      filtering and show every row).");
             Console.Error.WriteLine("  --symbols <path>    Override the symbol search path passed to the EventTracing SDK.");
-            Console.Error.WriteLine("  --no-symbols        Skip symbol load entirely (stacks render as raw addresses).");
+            Console.Error.WriteLine("  --no-symbols        Skip symbol load entirely. Per-row stack drill-downs in");
+            Console.Error.WriteLine("                      Exercises 2 and 3 are also suppressed because raw addresses");
+            Console.Error.WriteLine("                      are not actionable; outer Top-N tables and the executive");
+            Console.Error.WriteLine("                      summary are still produced.");
         }
 
         /// <summary>

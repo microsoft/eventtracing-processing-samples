@@ -45,27 +45,61 @@ namespace MemoryUsageChecker
             _file = new StreamWriter(filePath);
         }
 
-        /// <summary>Maximum number of rows displayed per "Top N" table (default 10).</summary>
-        public int TopN { get; init; } = 10;
+        /// <summary>Maximum number of rows displayed per "Top N" table (default 30).</summary>
+        public int TopN { get; init; } = 30;
 
         /// <summary>Maximum number of rows displayed per "Top K" stack list (default 5).</summary>
         public int TopK { get; init; } = 5;
 
         /// <summary>
-        /// Minimum size (in bytes) for an inner Top-K row to be displayed in
-        /// the text report. Applied to the per-process bucket breakdown in
-        /// Exercise 1, the per-process / per-driver stack lists in
-        /// Exercise 2 and 3, and the per-pool-tag breakdown in Exercise 3.
-        /// Default is 2 MiB (2 × 1048576 bytes) so the noisy sub-2 MB
-        /// kernel-stack / page-table tail rows that dominate small processes
-        /// are filtered out. Set to <c>0</c> via <c>--min-display-mb 0</c> to
-        /// see every Top-K row regardless of size (legacy behavior).
-        /// The "+ N more …" tail summary lines automatically absorb the
-        /// filtered entries because the source lists are sorted descending,
-        /// so the threshold only ever trims a contiguous sub-threshold
-        /// suffix of the displayed Top K.
+        /// Maximum number of <i>outer</i> Top-N rows that get an inner
+        /// per-row stack-dump / per-tag breakdown subsection (default 10).
+        /// This is independent of <see cref="TopN"/>: the outer table still
+        /// shows up to <see cref="TopN"/> entries (default 30), but only the
+        /// first <see cref="TopStacks"/> of them are drilled into with the
+        /// verbose Top-K stack list. Keeps the report scannable when
+        /// <see cref="TopN"/> is large.
+        /// </summary>
+        public int TopStacks { get; init; } = 10;
+
+        /// <summary>
+        /// True when the analysis is running with <c>--no-symbols</c>. The
+        /// per-row stack-dump subsections in Exercises 2 and 3 honor this:
+        /// when set, they replace the noisy
+        /// <c>module!0xRVA [no symbols]</c> frame dumps with a single
+        /// "[stack frames omitted — re-run without --no-symbols for
+        /// actionable stacks]" notice. Outer Top-N tables, ranked stacks
+        /// in the JSON sidecar, and the executive summary are still
+        /// emitted; only the per-frame text rendering is suppressed.
+        /// </summary>
+        public bool NoSymbols { get; init; }
+
+        /// <summary>
+        /// Minimum size (in bytes) for a row to be displayed in the text report.
+        /// Applied to BOTH the outer Top-N tables (top processes / top drivers
+        /// in Exercises 1, 2, and 3) AND the inner Top-K rows (per-process
+        /// bucket breakdown in Exercise 1, per-process / per-driver stack
+        /// lists in Exercises 2 and 3, and the per-pool-tag breakdown in
+        /// Exercise 3). Default is 2 MiB (2 × 1048576 bytes) so the noisy
+        /// sub-2 MB processes / kernel-stack / page-table tail rows that
+        /// dominate quiet captures are filtered out. Set to <c>0</c> via
+        /// <c>--min-display-mb 0</c> to see every row regardless of size
+        /// (legacy behavior). The "+ N more …" tail summary lines
+        /// automatically absorb the filtered entries because the source
+        /// lists are sorted descending, so the threshold only ever trims a
+        /// contiguous sub-threshold suffix of the displayed list.
         /// </summary>
         public long MinDisplayBytes { get; init; } = 2L * 1024L * 1024L;
+
+        /// <summary>
+        /// Returns a parenthesised suffix like <c>" (>= 2 MB)"</c> that can be
+        /// appended to outer Top-N sub-headers to make the active size filter
+        /// visible to the reader. Empty string when filtering is disabled
+        /// (<see cref="MinDisplayBytes"/> = 0).
+        /// </summary>
+        public string MinDisplaySuffix => MinDisplayBytes > 0
+            ? $" (>= {MinDisplayBytes / 1048576.0:0.##} MB)"
+            : string.Empty;
 
         /// <summary>Yellow. Section banner / exercise title.</summary>
         public void WriteHeader(string message)     => Write(message, ConsoleColor.Yellow);

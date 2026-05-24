@@ -6,8 +6,11 @@ using Microsoft.Windows.EventTracing.Metadata;
 using Microsoft.Windows.EventTracing.Processes;
 using Microsoft.Windows.EventTracing.Symbols;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MemoryUsageChecker
 {
@@ -80,6 +83,32 @@ namespace MemoryUsageChecker
         }
 
         /// <summary>
+        /// Per-driver accumulator populated by a single streaming pass over
+        /// the pool allocation intervals. Replaces the previous LINQ
+        /// <c>GroupBy / .Sum() × 4 / .ToList()</c> pipeline which iterated
+        /// every group six times — catastrophic on large traces (the
+        /// 11+ GB captures produced by long pool-with-stacks runs can hold
+        /// tens of millions of intervals).
+        /// </summary>
+        private sealed class DriverAcc
+        {
+            public IImage DriverImage;
+            public string DriverLeaf;
+            public long NonPagedImpacting;
+            public long NonPagedTransient;
+            public long PagedImpacting;
+            public long PagedTransient;
+            public long AllocCount;
+            /// <summary>
+            /// Per-interval back-references. Populated for every driver
+            /// during the streaming pass, then released for non-Top-N
+            /// drivers right after the rank cut so memory usage scales
+            /// with the displayed Top-N rather than the raw interval count.
+            /// </summary>
+            public List<IPoolAllocationInterval> Intervals;
+        }
+
+        /// <summary>
         /// Implements <b>Part A: Pool Allocations</b>. Groups every pool
         /// allocation interval by the first non-kernel image in its
         /// allocation stack (the responsible driver), ranks drivers by
@@ -99,33 +128,168 @@ namespace MemoryUsageChecker
                 return;
             }
 
-            var intervals = pendingPool.Result.Intervals.ToList();
+            // Parallel streaming pass: partition the interval list into per-thread
+            // accumulators, then merge. On modern multi-core CPUs this is the dominant
+            // win on huge traces — an 11+ GB capture with tens of millions of pool
+            // intervals (the pathological case the user hit) drops from "stuck for
+            // many minutes" to a few seconds of pure CPU saturation.
+            IReadOnlyList<IPoolAllocationInterval> intervals = pendingPool.Result.Intervals;
+            int intervalCount = intervals.Count;
+            Log.Info($"Exercise3 Pool: aggregating {intervalCount:N0} intervals across {Environment.ProcessorCount} cores...");
+            output.WriteInfo($"Aggregating {intervalCount:N0} pool allocations across {Environment.ProcessorCount} cores...");
 
-            // Group by the FIRST NON-KERNEL image in the allocation stack — that's the
-            // driver that actually requested the allocation. Frame[0] is always
-            // ntoskrnl!ExAllocatePool*, frames just above it are kernel helpers; the
-            // first frame whose image is not in KernelImages is the driver caller.
-            // Allocations whose entire stack is kernel-only fall into "(kernel-internal)".
-            var allPerDriver = intervals
-                .Where(i => i.Stack != null && i.Stack.Frames.Count > 0)
-                .Select(i => new { Interval = i, DriverImage = GetResponsibleDriverImage(i) })
-                .GroupBy(x => x.DriverImage?.Path ?? x.DriverImage?.FileName ?? KernelInternalBucket)
-                .Select(g => new
+            DateTime aggregateStart = DateTime.UtcNow;
+            long processedAtomic = 0;
+            long skippedNoStack = 0;
+
+            // Background ticker: log progress every 5s so a multi-minute aggregation
+            // on a huge trace no longer looks like a hang. The ticker stops as soon
+            // as the Parallel.ForEach below completes.
+            using var progressCts = new CancellationTokenSource();
+            Task progressTask = Task.Run(async () =>
+            {
+                try
                 {
-                    DriverKey = g.Key,
-                    DriverImage = g.Select(x => x.DriverImage).FirstOrDefault(img => img != null),
-                    DriverLeaf = g.Select(x => x.DriverImage?.FileName).FirstOrDefault(n => !string.IsNullOrEmpty(n)) ?? g.Key,
-                    NonPagedImpacting = g.Where(x => !x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp == null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
-                    NonPagedTransient = g.Where(x => !x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp != null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
-                    PagedImpacting = g.Where(x => x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp == null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
-                    PagedTransient = g.Where(x => x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp != null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
-                    AllocCount = g.LongCount(),
-                    Intervals = g.Select(x => x.Interval).ToList()
-                })
-                .OrderByDescending(x => x.NonPagedImpacting)
+                    while (!progressCts.IsCancellationRequested)
+                    {
+                        try { await Task.Delay(TimeSpan.FromSeconds(5), progressCts.Token).ConfigureAwait(false); }
+                        catch (TaskCanceledException) { break; }
+                        long cur = Interlocked.Read(ref processedAtomic);
+                        double pct = intervalCount > 0 ? (100.0 * cur / intervalCount) : 0.0;
+                        double elapsedSec = (DateTime.UtcNow - aggregateStart).TotalSeconds;
+                        double rate = elapsedSec > 0 ? cur / elapsedSec : 0;
+                        string line = $"  ... aggregated {cur:N0} of {intervalCount:N0} ({pct,5:F1}%) in {elapsedSec,5:F1}s ({rate / 1_000_000.0:F1} M/s)";
+                        Log.Info(line);
+                        // Use Console.Error so progress doesn't pollute the result file
+                        // (Console.Out is owned by OutputWriter for the result mirror).
+                        Console.Error.WriteLine(line);
+                    }
+                }
+                catch (Exception ex) { Log.Error("Pool progress ticker failed", ex); }
+            });
+
+            // Partition by index range so each worker walks a slice of the
+            // IReadOnlyList without enumerator overhead. Per-thread dictionaries
+            // avoid lock contention; we merge at the end (only ~hundreds of keys).
+            var partitioner = System.Collections.Concurrent.Partitioner.Create(0, intervalCount);
+            var perThreadDictionaries = new ConcurrentBag<Dictionary<string, DriverAcc>>();
+
+            Parallel.ForEach(
+                partitioner,
+                () => new Dictionary<string, DriverAcc>(capacity: 64, StringComparer.Ordinal),
+                (range, _, local) =>
+                {
+                    long localProcessed = 0;
+                    long localSkipped = 0;
+                    for (int idx = range.Item1; idx < range.Item2; idx++)
+                    {
+                        IPoolAllocationInterval i = intervals[idx];
+                        localProcessed++;
+                        if (i.Stack == null || i.Stack.Frames.Count == 0)
+                        {
+                            localSkipped++;
+                            continue;
+                        }
+
+                        IImage image = GetResponsibleDriverImage(i);
+                        string key = image?.Path ?? image?.FileName ?? KernelInternalBucket;
+
+                        if (!local.TryGetValue(key, out DriverAcc acc))
+                        {
+                            acc = new DriverAcc
+                            {
+                                DriverImage = image,
+                                DriverLeaf = image?.FileName ?? key,
+                                Intervals = new List<IPoolAllocationInterval>(),
+                            };
+                            local[key] = acc;
+                        }
+                        else if (acc.DriverImage == null && image != null)
+                        {
+                            acc.DriverImage = image;
+                            if (string.IsNullOrEmpty(acc.DriverLeaf) || acc.DriverLeaf == key)
+                            {
+                                acc.DriverLeaf = image.FileName ?? acc.DriverLeaf;
+                            }
+                        }
+
+                        long bytes = i.AllocationRange.Size.Bytes;
+                        bool paged = i.PoolType.IsPaged;
+                        bool freed = i.FreeTimestamp != null;
+                        if (!paged && !freed) acc.NonPagedImpacting += bytes;
+                        else if (!paged && freed) acc.NonPagedTransient += bytes;
+                        else if (paged && !freed) acc.PagedImpacting += bytes;
+                        else acc.PagedTransient += bytes;
+                        acc.AllocCount++;
+                        acc.Intervals.Add(i);
+                    }
+                    Interlocked.Add(ref processedAtomic, localProcessed);
+                    Interlocked.Add(ref skippedNoStack, localSkipped);
+                    return local;
+                },
+                local => perThreadDictionaries.Add(local));
+
+            // Stop the progress ticker and let it print its final tick.
+            progressCts.Cancel();
+            try { progressTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+
+            // Merge per-thread dictionaries. The key space is small (number of
+            // distinct drivers, typically < 500) so this is cheap.
+            var accByKey = new Dictionary<string, DriverAcc>(capacity: 256, StringComparer.Ordinal);
+            foreach (var local in perThreadDictionaries)
+            {
+                foreach (var kvp in local)
+                {
+                    if (!accByKey.TryGetValue(kvp.Key, out DriverAcc agg))
+                    {
+                        accByKey[kvp.Key] = kvp.Value;
+                    }
+                    else
+                    {
+                        agg.NonPagedImpacting += kvp.Value.NonPagedImpacting;
+                        agg.NonPagedTransient += kvp.Value.NonPagedTransient;
+                        agg.PagedImpacting += kvp.Value.PagedImpacting;
+                        agg.PagedTransient += kvp.Value.PagedTransient;
+                        agg.AllocCount += kvp.Value.AllocCount;
+                        agg.Intervals.AddRange(kvp.Value.Intervals);
+                        if (agg.DriverImage == null && kvp.Value.DriverImage != null)
+                        {
+                            agg.DriverImage = kvp.Value.DriverImage;
+                            if (string.IsNullOrEmpty(agg.DriverLeaf) || agg.DriverLeaf == kvp.Key)
+                            {
+                                agg.DriverLeaf = kvp.Value.DriverImage.FileName ?? agg.DriverLeaf;
+                            }
+                        }
+                    }
+                }
+            }
+
+            double aggregateSec = (DateTime.UtcNow - aggregateStart).TotalSeconds;
+            string completeLine = $"Aggregated {processedAtomic:N0} intervals into {accByKey.Count:N0} driver buckets in {aggregateSec:F1}s (skipped {Interlocked.Read(ref skippedNoStack):N0} stack-less).";
+            Log.Info("Exercise3 Pool: " + completeLine);
+            output.WriteInfo(completeLine);
+
+            var allPerDriver = accByKey
+                .Select(kvp => new { DriverKey = kvp.Key, Acc = kvp.Value })
+                .OrderByDescending(x => x.Acc.NonPagedImpacting)
                 .ToList();
 
-            var perDriver = allPerDriver.Take(output.TopN).ToList();
+            var perDriver = allPerDriver
+                .Where(x => x.Acc.NonPagedImpacting >= output.MinDisplayBytes)
+                .Take(output.TopN)
+                .ToList();
+
+            // Release per-interval references for drivers that didn't make the
+            // Top-N cut so working-set memory scales with the displayed set
+            // rather than the raw interval count.
+            var topKeys = new HashSet<string>(perDriver.Select(x => x.DriverKey), StringComparer.Ordinal);
+            foreach (var kvp in accByKey)
+            {
+                if (!topKeys.Contains(kvp.Key))
+                {
+                    kvp.Value.Intervals = null;
+                }
+            }
 
             JsonReport.Exercise3PoolAllocations jsonPool = null;
             if (jsonSection != null)
@@ -134,16 +298,17 @@ namespace MemoryUsageChecker
                 jsonSection.PoolAllocations = jsonPool;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} drivers by NonPaged Impacting size (KB):");
+            output.WriteSubHeader($"Top {output.TopN} drivers by NonPaged Impacting size (KB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in perDriver)
             {
                 rank++;
-                string driverLabel = ImageFormatter.FormatDriverShort(row.DriverImage, row.DriverLeaf);
+                DriverAcc acc = row.Acc;
+                string driverLabel = ImageFormatter.FormatDriverShort(acc.DriverImage, acc.DriverLeaf);
                 string line =
-                    $"  {driverLabel,-60}  NP-Imp {row.NonPagedImpacting / 1024.0,9:F1}  NP-Tr {row.NonPagedTransient / 1024.0,9:F1}  " +
-                    $"P-Imp {row.PagedImpacting / 1024.0,9:F1}  P-Tr {row.PagedTransient / 1024.0,9:F1}  KB  ({row.AllocCount} allocs)";
-                if (row.NonPagedImpacting >= NotableNonPagedBytes)
+                    $"  {driverLabel,-60}  NP-Imp {acc.NonPagedImpacting / 1024.0,9:F1}  NP-Tr {acc.NonPagedTransient / 1024.0,9:F1}  " +
+                    $"P-Imp {acc.PagedImpacting / 1024.0,9:F1}  P-Tr {acc.PagedTransient / 1024.0,9:F1}  KB  ({acc.AllocCount} allocs)";
+                if (acc.NonPagedImpacting >= NotableNonPagedBytes)
                 {
                     // Threshold breach — force red regardless of rank.
                     output.WriteCritical(line);
@@ -158,22 +323,22 @@ namespace MemoryUsageChecker
                     jsonPool.TopDriversByNonPagedImpactingBytes.Add(new JsonReport.RankedDriverPool
                     {
                         Rank = rank,
-                        Driver = ImageFormatter.BuildDriverIdentity(row.DriverImage, row.DriverLeaf, row.DriverKey),
-                        NonPagedImpactingBytes = row.NonPagedImpacting,
-                        NonPagedTransientBytes = row.NonPagedTransient,
-                        PagedImpactingBytes = row.PagedImpacting,
-                        PagedTransientBytes = row.PagedTransient,
-                        AllocationCount = row.AllocCount,
+                        Driver = ImageFormatter.BuildDriverIdentity(acc.DriverImage, acc.DriverLeaf, row.DriverKey),
+                        NonPagedImpactingBytes = acc.NonPagedImpacting,
+                        NonPagedTransientBytes = acc.NonPagedTransient,
+                        PagedImpactingBytes = acc.PagedImpacting,
+                        PagedTransientBytes = acc.PagedTransient,
+                        AllocationCount = acc.AllocCount,
                         TopImpactingStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
-                            row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
+                            acc.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
                                          .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
                             output.TopK,
                             output.MinDisplayBytes),
-                        TopTransientStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
-                            row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp != null)
-                                         .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
-                            output.TopK,
-                            output.MinDisplayBytes)
+                        // Transient (already-freed) pool stacks are intentionally
+                        // omitted from the JSON to keep the actionable signal high
+                        // — they are not leaks and the per-driver Transient byte
+                        // total above is sufficient context.
+                        TopTransientStacks = new List<JsonReport.RankedStack>()
                     });
                 }
             }
@@ -181,7 +346,7 @@ namespace MemoryUsageChecker
             if (allPerDriver.Count > perDriver.Count)
             {
                 int tailCount = allPerDriver.Count - perDriver.Count;
-                long tailBytes = allPerDriver.Skip(perDriver.Count).Sum(x => x.NonPagedImpacting);
+                long tailBytes = allPerDriver.Skip(perDriver.Count).Sum(x => x.Acc.NonPagedImpacting);
                 double tailKb = tailBytes / 1024.0;
                 output.WriteTail($"  + {tailCount} more drivers totaling {tailKb:F1} KB NP-Imp");
                 if (jsonPool != null)
@@ -196,27 +361,60 @@ namespace MemoryUsageChecker
             }
             output.WriteBlank();
 
-            // Per top-driver: top-K Impacting and Transient stacks (NonPaged)
-            foreach (var row in perDriver)
+            // Per top-driver: top-K alloc stacks for OUTSTANDING (Impacting)
+            // allocations only. Transient (already-freed) allocations are
+            // intentionally skipped from the stack render because a freed
+            // allocation is by definition not a leak — surfacing its top stack
+            // would be noise that dilutes the actionable signal. The Transient
+            // total is still shown in the per-driver row above for context.
+            // Drill-down is also suppressed entirely under --no-symbols (raw
+            // ntoskrnl!0xRVA frames aren't actionable) and capped at the first
+            // --top-stacks ranked drivers.
+            int poolDrillDownLimit = Math.Min(output.TopStacks, perDriver.Count);
+            if (output.NoSymbols)
             {
-                string driverLabel = ImageFormatter.FormatDriverShort(row.DriverImage, row.DriverLeaf);
-                output.WriteSubHeader($"Top {output.TopK} pool alloc stacks for {driverLabel} (NonPaged only)");
-                Exercise2_VirtualAllocHeap.WriteTopStacks(output, "Impacting",
-                    row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
-                                 .Select(x => (x.Stack, x.AllocationRange.Size.Bytes)));
-                Exercise2_VirtualAllocHeap.WriteTopStacks(output, "Transient",
-                    row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp != null)
-                                 .Select(x => (x.Stack, x.AllocationRange.Size.Bytes)));
-                output.WriteBlank();
+                output.WriteSkipped("Per-driver pool-stack drill-down skipped (--no-symbols) — re-run without --no-symbols for actionable stacks.");
+            }
+            else if (poolDrillDownLimit == 0)
+            {
+                output.WriteSkipped("Per-driver pool-stack drill-down skipped (--top-stacks 0).");
+            }
+            else
+            {
+                if (perDriver.Count > poolDrillDownLimit)
+                {
+                    output.WriteTail($"(Drill-down emitted for the top {poolDrillDownLimit} of {perDriver.Count} ranked driver(s); raise --top-stacks to see more.)");
+                }
+                int drilledDrivers = 0;
+                foreach (var row in perDriver)
+                {
+                    if (drilledDrivers >= poolDrillDownLimit) break;
+                    drilledDrivers++;
+                    DriverAcc acc = row.Acc;
+                    string driverLabel = ImageFormatter.FormatDriverShort(acc.DriverImage, acc.DriverLeaf);
+                    output.WriteSubHeader($"Top {output.TopK} outstanding NonPaged pool alloc stacks for {driverLabel}");
+                    Exercise2_VirtualAllocHeap.WriteTopStacks(output, "Impacting",
+                        acc.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
+                                     .Select(x => (x.Stack, x.AllocationRange.Size.Bytes)));
+                    output.WriteBlank();
+                }
             }
 
-            // Per #1 driver: per-pool-tag breakdown (ranked + tail summary)
-            var topDriver = perDriver.FirstOrDefault();
-            if (topDriver != null)
+            // Per-pool-tag breakdown for the top drivers. Previously emitted
+            // only for #1; we now drill into the top min(--top-stacks, 3)
+            // drivers because the 2nd and 3rd worst offenders are equally
+            // actionable signals. The tag column is the strongest
+            // "where do I look in the driver" hint when symbols are missing,
+            // so we keep emitting it under --no-symbols too.
+            int tagDriverLimit = Math.Min(Math.Min(output.TopStacks, 3), perDriver.Count);
+            for (int td = 0; td < tagDriverLimit; td++)
             {
-                string topDriverLabel = ImageFormatter.FormatDriverShort(topDriver.DriverImage, topDriver.DriverLeaf);
-                output.WriteSubHeader($"Per-pool-tag breakdown for #1 driver {topDriverLabel} (top {output.TopK})");
-                var allTagBreakdown = topDriver.Intervals
+                var entry = perDriver[td];
+                DriverAcc topAcc = entry.Acc;
+                if (topAcc.Intervals == null) continue;
+                string topDriverLabel = ImageFormatter.FormatDriverShort(topAcc.DriverImage, topAcc.DriverLeaf);
+                output.WriteSubHeader($"Per-pool-tag breakdown for #{td + 1} driver {topDriverLabel} (top {output.TopK})");
+                var allTagBreakdown = topAcc.Intervals
                     .GroupBy(x => string.IsNullOrEmpty(x.Tag) ? "(no tag)" : x.Tag)
                     .Select(g => new
                     {
@@ -234,13 +432,19 @@ namespace MemoryUsageChecker
                 {
                     tagRank++;
                     output.WriteRanked(tagRank, tagBreakdown.Count, $"  tag {t.Tag,-8}  NP-Imp {t.NpImp / 1024.0,9:F1} KB  ({t.Count} allocs)");
-                    jsonPool?.TopDriverTagBreakdown.Add(new JsonReport.RankedTag
+                    // Only the #1 driver's tag breakdown is persisted to the
+                    // JSON sidecar today to preserve schema stability; the
+                    // text report carries the top-3 view above.
+                    if (td == 0)
                     {
-                        Rank = tagRank,
-                        Tag = t.Tag,
-                        NonPagedImpactingBytes = t.NpImp,
-                        AllocationCount = t.Count
-                    });
+                        jsonPool?.TopDriverTagBreakdown.Add(new JsonReport.RankedTag
+                        {
+                            Rank = tagRank,
+                            Tag = t.Tag,
+                            NonPagedImpactingBytes = t.NpImp,
+                            AllocationCount = t.Count
+                        });
+                    }
                 }
                 if (allTagBreakdown.Count > tagBreakdown.Count)
                 {
@@ -248,7 +452,7 @@ namespace MemoryUsageChecker
                     long tailBytes = allTagBreakdown.Skip(tagBreakdown.Count).Sum(x => x.NpImp);
                     double tailKb = tailBytes / 1024.0;
                     output.WriteTail($"  + {tailCount} more tags totaling {tailKb:F1} KB NP-Imp");
-                    if (jsonPool != null)
+                    if (td == 0 && jsonPool != null)
                     {
                         jsonPool.TailTagBreakdown = new JsonReport.TailSummary
                         {
@@ -258,6 +462,7 @@ namespace MemoryUsageChecker
                         };
                     }
                 }
+                output.WriteBlank();
             }
         }
 
@@ -365,7 +570,10 @@ namespace MemoryUsageChecker
                 .OrderByDescending(x => x.Bytes)
                 .ToList();
 
-            var displayed = allByDriver.Take(output.TopN).ToList();
+            var displayed = allByDriver
+                .Where(x => x.Bytes >= output.MinDisplayBytes)
+                .Take(output.TopN)
+                .ToList();
 
             if (displayed.Count == 0)
             {
@@ -386,7 +594,7 @@ namespace MemoryUsageChecker
                 jsonSection.DriverCodeFootprint = jsonFootprint;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} drivers by code resident footprint (MB):");
+            output.WriteSubHeader($"Top {output.TopN} drivers by code resident footprint (MB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in displayed)
             {

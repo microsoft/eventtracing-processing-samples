@@ -5,6 +5,7 @@ using Microsoft.Windows.EventTracing.Memory;
 using Microsoft.Windows.EventTracing.Metadata;
 using Microsoft.Windows.EventTracing.Processes;
 using Microsoft.Windows.EventTracing.Symbols;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -102,7 +103,10 @@ namespace MemoryUsageChecker
                 .OrderByDescending(x => x.Impacting)
                 .ToList();
 
-            var perProcess = allPerProcess.Take(output.TopN).ToList();
+            var perProcess = allPerProcess
+                .Where(x => x.Impacting >= output.MinDisplayBytes)
+                .Take(output.TopN)
+                .ToList();
 
             JsonReport.Exercise2VirtualAlloc jsonVa = null;
             if (jsonSection != null)
@@ -111,7 +115,7 @@ namespace MemoryUsageChecker
                 jsonSection.VirtualAlloc = jsonVa;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} processes by Impacting commit size (MB):");
+            output.WriteSubHeader($"Top {output.TopN} processes by Impacting commit size (MB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in perProcess)
             {
@@ -160,13 +164,37 @@ namespace MemoryUsageChecker
             }
             output.WriteBlank();
 
-            foreach (var row in perProcess)
+            // Per-process stack drill-downs: skipped entirely when --no-symbols
+            // (raw addresses aren't actionable) and capped at the first
+            // --top-stacks rows of the outer table so a large --top doesn't
+            // explode the report. The outer ranked table above already lists
+            // up to --top processes.
+            int drillDownLimit = Math.Min(output.TopStacks, perProcess.Count);
+            if (output.NoSymbols)
             {
-                output.WriteSubHeader($"Top {output.TopK} commit stacks for {ImageFormatter.FormatProcessShort(row.Process)}");
+                output.WriteSkipped("Per-process commit-stack drill-down skipped (--no-symbols) — re-run without --no-symbols for actionable stacks.");
+            }
+            else if (drillDownLimit == 0)
+            {
+                output.WriteSkipped("Per-process commit-stack drill-down skipped (--top-stacks 0).");
+            }
+            else
+            {
+                if (perProcess.Count > drillDownLimit)
+                {
+                    output.WriteTail($"(Drill-down emitted for the top {drillDownLimit} of {perProcess.Count} ranked process(es); raise --top-stacks to see more.)");
+                }
+                int drilled = 0;
+                foreach (var row in perProcess)
+                {
+                    if (drilled >= drillDownLimit) break;
+                    drilled++;
+                    output.WriteSubHeader($"Top {output.TopK} commit stacks for {ImageFormatter.FormatProcessShort(row.Process)}");
 
-                WriteTopStacks(output, "Impacting", row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => (x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)));
-                WriteTopStacks(output, "Transient", row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => (x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)));
-                output.WriteBlank();
+                    WriteTopStacks(output, "Impacting", row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => (x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)));
+                    WriteTopStacks(output, "Transient", row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => (x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)));
+                    output.WriteBlank();
+                }
             }
         }
 
@@ -212,7 +240,10 @@ namespace MemoryUsageChecker
                 .OrderByDescending(x => x.OutstandingBytes)
                 .ToList();
 
-            var perProcessSummary = allPerProcessSummary.Take(output.TopN).ToList();
+            var perProcessSummary = allPerProcessSummary
+                .Where(x => x.OutstandingBytes >= output.MinDisplayBytes)
+                .Take(output.TopN)
+                .ToList();
 
             JsonReport.Exercise2Heap jsonHeap = null;
             if (jsonSection != null)
@@ -221,7 +252,7 @@ namespace MemoryUsageChecker
                 jsonSection.Heap = jsonHeap;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} processes by outstanding heap size (KB):");
+            output.WriteSubHeader($"Top {output.TopN} processes by outstanding heap size (KB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in perProcessSummary)
             {
@@ -273,8 +304,27 @@ namespace MemoryUsageChecker
             }
             output.WriteBlank();
 
+            int heapDrillDownLimit = Math.Min(output.TopStacks, perProcessSummary.Count);
+            if (output.NoSymbols)
+            {
+                output.WriteSkipped("Per-process heap-stack drill-down skipped (--no-symbols) — re-run without --no-symbols for actionable stacks.");
+                return;
+            }
+            if (heapDrillDownLimit == 0)
+            {
+                output.WriteSkipped("Per-process heap-stack drill-down skipped (--top-stacks 0).");
+                return;
+            }
+            if (perProcessSummary.Count > heapDrillDownLimit)
+            {
+                output.WriteTail($"(Drill-down emitted for the top {heapDrillDownLimit} of {perProcessSummary.Count} ranked process(es); raise --top-stacks to see more.)");
+            }
+            int heapDrilled = 0;
             foreach (var row in perProcessSummary)
             {
+                if (heapDrilled >= heapDrillDownLimit) break;
+                heapDrilled++;
+
                 // Largest heap handle for this process by outstanding bytes
                 var largestHeap = row.Snapshot.Allocations
                     .GroupBy(a => a.HeapHandle)

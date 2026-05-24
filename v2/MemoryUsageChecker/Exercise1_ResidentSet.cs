@@ -121,12 +121,14 @@ namespace MemoryUsageChecker
         /// total down by <see cref="ResidentSetPageCategory"/> so the reader
         /// can see whether the cost is image (code), private (heap/stack),
         /// session, mapped file, etc. The summary ends with a <c>"+ N more"</c>
-        /// tail line so the truncation is honest.
+        /// tail line so the truncation is honest. When the snapshot contains
+        /// no Active per-process pages (e.g. the Standby/Modified-only
+        /// snapshots produced as a side-effect of the main snapshot) the
+        /// method emits a single one-line note and returns, instead of an
+        /// empty Top-N placeholder table.
         /// </summary>
         private static void WriteTopProcessesByActive(OutputWriter output, IReadOnlyList<IResidentSetPage> pages, JsonReport.Exercise1Snapshot jsonSnapshot)
         {
-            output.WriteSubHeader($"Top {output.TopN} processes by Active working set (MB):");
-
             var allActiveByProcess = pages
                 .Where(p => p.MemoryManagerListType == MemoryManagerListType.Active && p.Process != null)
                 .GroupBy(p => p.Process)
@@ -144,11 +146,19 @@ namespace MemoryUsageChecker
 
             if (allActiveByProcess.Count == 0)
             {
-                output.WriteSkipped("  (no per-process Active pages in this snapshot)");
+                // Skip the Top-N subheader entirely — emitting it followed by
+                // an empty body just adds noise to the Standby/Modified-only
+                // snapshots that don't carry per-process Active pages.
+                output.WriteSkipped("  (no per-process Active pages in this snapshot — typical for Standby/Modified-only MMList captures)");
                 return;
             }
 
-            var topProcesses = allActiveByProcess.Take(output.TopN).ToList();
+            output.WriteSubHeader($"Top {output.TopN} processes by Active working set (MB){output.MinDisplaySuffix}:");
+
+            var topProcesses = allActiveByProcess
+                .Where(x => x.TotalBytes >= output.MinDisplayBytes)
+                .Take(output.TopN)
+                .ToList();
 
             int rank = 0;
             foreach (var row in topProcesses)
@@ -208,12 +218,17 @@ namespace MemoryUsageChecker
         /// contributors grouped by image path. Pages in this category are
         /// non-paged pool that a kernel-mode driver has locked in physical
         /// RAM. A driver that dominates this list is a classic candidate
-        /// for a memory-footprint regression bug.
+        /// for a memory-footprint regression bug. The subheader is suppressed
+        /// when the snapshot has no DriverLockedSystemPage entries (typical
+        /// for non-primary MMList snapshots) so the report doesn't fill
+        /// with empty placeholder tables. When the only entries that
+        /// survive the filter are <c>(unknown)</c> path stubs (the
+        /// Loader profile was not captured) the method emits an
+        /// explanatory single-line note so the reader knows the bytes are
+        /// real but the responsible driver wasn't resolved.
         /// </summary>
         private static void WriteDriverLockedNonPaged(OutputWriter output, IReadOnlyList<IResidentSetPage> pages, JsonReport.Exercise1Snapshot jsonSnapshot)
         {
-            output.WriteSubHeader($"Top {output.TopN} driver-locked non-paged contributors (MB):");
-
             var allByDriver = pages
                 .Where(p => p.Category == ResidentSetPageCategory.DriverLockedSystemPage)
                 .GroupBy(p => p.Path ?? p.Tag ?? "(unknown)")
@@ -223,11 +238,36 @@ namespace MemoryUsageChecker
 
             if (allByDriver.Count == 0)
             {
-                output.WriteFinding("  (no DriverLockedSystemPage entries found)");
+                output.WriteFinding("  (no DriverLockedSystemPage entries in this snapshot)");
                 return;
             }
 
-            var topDrivers = allByDriver.Take(output.TopN).ToList();
+            var topDrivers = allByDriver
+                .Where(x => x.Bytes >= output.MinDisplayBytes)
+                .Take(output.TopN)
+                .ToList();
+
+            // When the only thing that survives the filter is "(unknown)" we
+            // emit a single explanatory line instead of a one-row Top-N table —
+            // a bare "(unknown) X MB" is not actionable.
+            if (topDrivers.Count == 1 && topDrivers[0].Path == "(unknown)")
+            {
+                double unknownMb = topDrivers[0].Bytes / 1024.0 / 1024.0;
+                output.WriteNotable($"  {unknownMb,10:F2} MB driver-locked non-paged pages but the responsible driver could not be resolved (Loader keyword may not have been captured).");
+                if (jsonSnapshot != null)
+                {
+                    jsonSnapshot.TopDriverLockedNonPaged.Add(new JsonReport.RankedDriverLocked
+                    {
+                        Rank = 1,
+                        Identifier = topDrivers[0].Path,
+                        Bytes = topDrivers[0].Bytes,
+                        Megabytes = unknownMb
+                    });
+                }
+                return;
+            }
+
+            output.WriteSubHeader($"Top {output.TopN} driver-locked non-paged contributors (MB){output.MinDisplaySuffix}:");
 
             int rank = 0;
             foreach (var row in topDrivers)

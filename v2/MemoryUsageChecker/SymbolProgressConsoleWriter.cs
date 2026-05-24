@@ -47,9 +47,15 @@ namespace MemoryUsageChecker
         private static readonly char s_filledChar = s_unicodeSupported ? '\u2588' : '#'; // █
         private static readonly char s_emptyChar  = s_unicodeSupported ? '\u2591' : '-'; // ░
 
+        // Fixed text around the bar, used to compute how many cells the bar can
+        // safely occupy without forcing the formatted line to wrap. Kept here as
+        // named constants so FormatLine and the responsive-width math stay in sync.
+        private const string LinePrefix = "Loading symbols: [";
+        private const string LineBarClose = "] ";
+
         private readonly TextWriter _inner;
         private readonly bool _redirected;
-        private readonly int _barWidth;
+        private readonly int _maxBarWidth;
         private readonly StringBuilder _buffer = new StringBuilder(160);
         private readonly object _sync = new object();
         private readonly TimeSpan _minRedrawInterval = TimeSpan.FromMilliseconds(100);
@@ -67,12 +73,17 @@ namespace MemoryUsageChecker
         /// True when stdout is redirected (file / pipe). When true, the bar falls back to
         /// milestone-only emission so log files do not get a giant single line.
         /// </param>
-        /// <param name="barWidth">Number of bar cells (clamped to a sensible minimum).</param>
+        /// <param name="barWidth">
+        /// Preferred number of bar cells. The actual bar is shrunk per-render so the full
+        /// "Loading symbols: [...] XX.X% (...)" line never exceeds
+        /// <see cref="Console.WindowWidth"/> — otherwise each \r would only rewrite the
+        /// last wrapped row, leaving previous wraps in the scrollback buffer.
+        /// </param>
         public SymbolProgressConsoleWriter(TextWriter inner, bool redirected, int barWidth = 30)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
             _redirected = redirected;
-            _barWidth = Math.Max(10, barWidth);
+            _maxBarWidth = Math.Max(10, barWidth);
         }
 
         public override Encoding Encoding => _inner.Encoding;
@@ -210,18 +221,65 @@ namespace MemoryUsageChecker
 
         private string FormatLine(double pct, long processed, long total, long loaded)
         {
-            int filled = (int)Math.Round(_barWidth * pct / 100.0);
+            string tail = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0,5:F1}% ({1}/{2}; {3} loaded)",
+                pct, processed, total, loaded);
+
+            // Size the bar so the whole formatted line fits inside the current
+            // console window. Without this, a line wider than Console.WindowWidth
+            // wraps to a second row and the next \r only rewrites that wrapped
+            // row — leaving every previous bar in the scrollback buffer as if
+            // we were emitting one line per progress event.
+            int barWidth = _maxBarWidth;
+            if (!_redirected)
+            {
+                int windowWidth = SafeWindowWidth();
+                if (windowWidth > 0)
+                {
+                    // Reserve LinePrefix + LineBarClose + tail + 1 trailing column
+                    // (the cursor parks one cell past the last char written, and
+                    // some terminals advance to the next row when that cell hits
+                    // the rightmost column).
+                    int reserved = LinePrefix.Length + LineBarClose.Length + tail.Length + 1;
+                    int available = windowWidth - reserved;
+                    barWidth = Math.Max(0, Math.Min(_maxBarWidth, available));
+                }
+            }
+
+            if (barWidth <= 0)
+            {
+                // Console too narrow even for a 1-cell bar — drop the bar but
+                // keep the in-place text update so we still don't spam newlines.
+                return "Loading symbols: " + tail;
+            }
+
+            int filled = (int)Math.Round(barWidth * pct / 100.0);
             if (filled < 0) filled = 0;
-            if (filled > _barWidth) filled = _barWidth;
+            if (filled > barWidth) filled = barWidth;
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "Loading symbols: [{0}{1}] {2,5:F1}% ({3}/{4}; {5} loaded)",
+                "{0}{1}{2}{3}{4}",
+                LinePrefix,
                 new string(s_filledChar, filled),
-                new string(s_emptyChar, _barWidth - filled),
-                pct,
-                processed,
-                total,
-                loaded);
+                new string(s_emptyChar, barWidth - filled),
+                LineBarClose,
+                tail);
+        }
+
+        private static int SafeWindowWidth()
+        {
+            try
+            {
+                int w = Console.WindowWidth;
+                return w > 0 ? w : 0;
+            }
+            catch
+            {
+                // Headless host / no console attached: skip the constraint and
+                // let _maxBarWidth stand.
+                return 0;
+            }
         }
 
         private void FinalizeBarIfShown()

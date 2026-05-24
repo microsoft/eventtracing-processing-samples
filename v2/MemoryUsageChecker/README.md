@@ -84,7 +84,7 @@ Capture with **Logging mode = File** and save the resulting `.etl` to disk.
 ## 2. Running the sample
 
 ```
-MemoryUsageChecker.exe [<trace.etl>] [--top N] [--min-display-mb V] [--symbols <path>] [--no-symbols]
+MemoryUsageChecker.exe [<trace.etl>] [--top N] [--top-stacks N] [--min-display-mb V] [--symbols <path>] [--no-symbols]
 ```
 
 When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by **double-clicking** it in Explorer), the tool auto-selects the most recently modified `*.etl` file located in the **same folder as the .exe**, preferring `MemoryUsage-Trace.etl` (the canonical name produced by `MemoryUsageTrace.cmd`). The selected path is printed in cyan before processing starts. This makes the canonical one-folder workflow — collect with `MemoryUsageTrace.cmd`, analyze by double-clicking `MemoryUsageChecker.exe` — work without ever opening a shell.
@@ -92,10 +92,11 @@ When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by
 | Argument | Default | Description |
 |---|---|---|
 | `<trace.etl>` | auto-discovered next to the .exe | Path to the ETL file. Omit to use the most recent `*.etl` sitting next to `MemoryUsageChecker.exe`. |
-| `--top N` | `10` | Caps the number of top entries displayed per category. |
-| `--min-display-mb V` | `2` | Hides inner Top-K bucket / stack rows below **V MiB** in **both** the text report and the JSON sidecar (e.g. the tiny `KernelStack`, `UserStack`, `WorkingSetMetadata` slivers under a process, and sub-2 MB commit-stack rows). The outer Top-N tables are unaffected. Pass `0` to disable filtering and emit every row. The "+ N more …" tail summary lines always account for the full tail so nothing is lost — only the noisy rows are trimmed from the displayed Top K. |
+| `--top N` | `30` | Caps the number of rows displayed per **outer Top-N table** (top processes, top drivers). |
+| `--top-stacks N` | `10` | Caps how many of the outer Top-N rows get the verbose **inner stack drill-down** (per-process commit stacks, per-driver pool stacks, per-pool-tag breakdown). The outer table still lists up to `--top` entries; only the drill-down is capped. Pass `0` to suppress all drill-downs. |
+| `--min-display-mb V` | `2` | Hides rows below **V MiB** in **both** the **outer Top-N tables** (top processes, top drivers) **and** the inner Top-K bucket / stack rows (e.g. the tiny `KernelStack`, `UserStack`, `WorkingSetMetadata` slivers under a process, sub-2 MB commit-stack rows, and per-pool-tag rows) in the text report and the JSON sidecar. Pass `0` to disable filtering and emit every row. The "+ N more …" tail summary lines always account for the full tail so nothing is lost — only the sub-threshold rows are trimmed from the displayed lists. The active filter is shown in each outer Top-N sub-header (e.g. `Top 30 processes by Active working set (MB) (>= 2 MB):`) so the reader can tell at a glance why the table is shorter than `--top N`. |
 | `--symbols <path>` | (see below) | Override the symbol search path. Accepts any `symsrv`-compatible string, including `SRV*<cache>*<server>`. |
-| `--no-symbols` | (off) | Skip symbol resolution. Exercises 2 and 3 still run but stack frames show `[no symbols]`. |
+| `--no-symbols` | (off) | Skip symbol resolution. Outer Top-N tables, the per-pool-tag breakdown, the executive summary, and the JSON sidecar are still emitted, but the per-row stack drill-down subsections in Exercises 2 and 3 are suppressed (raw `module!0xRVA` addresses are not actionable — re-run without `--no-symbols` to see them). |
 
 Symbol-path resolution precedence (when `--no-symbols` is not specified):
 
@@ -108,6 +109,8 @@ Symbol-path resolution precedence (when `--no-symbols` is not specified):
 The active symbol source is printed at the top of every run, so you can confirm which path the sample resolved before stacks are decoded.
 
 A timestamped result file `MemoryUsage_Result_yyyyMMdd_HHmm.txt` is written next to the working directory and mirrors the console output (without colors), ready to attach to a bug.
+
+A companion **executive summary** `MemoryUsage_Summary_yyyyMMdd_HHmm.txt` (a ~30-line plain-text digest of the top actionable findings — worst process, worst driver, dominant pool tag, single recommended next step) is also written next to the result file. The same content is appended to the bottom of the main result file under a `=== EXECUTIVE SUMMARY ===` banner. This is the file to paste into a bug report when you need brevity.
 
 A companion **diagnostic log** `MemoryUsage_Diag_yyyyMMdd_HHmm.log` is written next to the result file on every run. It captures the assembly version, the .NET runtime version, the OS description, the parsed command-line, the resolved symbol path, the `HasResult` flag and item count for every ETL data source, and per-phase `BEGIN`/`END (elapsed=Xs)` timings. If any exercise throws, the full exception type, message, stack trace, and up to five levels of inner-exception detail are appended. **Please attach this log together with the result file when reporting an issue** — it lets the maintainer reproduce the run state without re-collecting the trace.
 
@@ -138,12 +141,12 @@ The result file (`MemoryUsage_Result_*.txt`) contains the same content without c
 ```
 === Exercise 3: Pool ===
 --- Pool Allocations ---
-Top 10 drivers by NonPaged Impacting size (KB):
+Top 30 drivers by NonPaged Impacting size (KB) (>= 2 MB):
   Ndu.sys                       NP-Imp   12288.0  NP-Tr     128.0  P-Imp     0.0  P-Tr     0.0  KB  (4096 allocs)   <-- Red (Critical: ≥ 1 MB NP-Imp)
-  Tcpip.sys                     NP-Imp     820.5  NP-Tr     256.0  P-Imp    32.0  P-Tr    16.0  KB  ( 312 allocs)   <-- Yellow (High)
-  netbt.sys                     NP-Imp      96.0  NP-Tr      48.0  P-Imp     0.0  P-Tr     0.0  KB  (  18 allocs)   <-- White (Normal)
+  Tcpip.sys                     NP-Imp    3072.0  NP-Tr     256.0  P-Imp    32.0  P-Tr    16.0  KB  ( 312 allocs)   <-- Yellow (High)
+  storport.sys                  NP-Imp    2096.0  NP-Tr      48.0  P-Imp     0.0  P-Tr     0.0  KB  (  18 allocs)   <-- White (Normal)
   ...
-  + 47 more drivers totaling 312.4 KB NP-Imp                                                                        <-- DarkGray (Tail)
+  + 47 more drivers totaling 408.4 KB NP-Imp                                                                        <-- DarkGray (Tail; includes drivers trimmed because < 2 MB NP-Imp)
 
 Top 5 pool alloc stacks for Ndu.sys (NonPaged only)
 Impacting:
@@ -153,11 +156,11 @@ Impacting:
         ...
 
 --- Driver Code Footprint (File Backed Pages) ---
-Top 10 drivers by code resident footprint (MB):
+Top 30 drivers by code resident footprint (MB) (>= 2 MB):
       4.12 MB     1056 pages  nvlddmkm.sys                  \SystemRoot\System32\drivers\nvlddmkm.sys                 <-- Red (≥ 2 MB)
-      1.78 MB      456 pages  Tcpip.sys                     \SystemRoot\System32\drivers\Tcpip.sys                    <-- Yellow
-      0.42 MB      108 pages  Ndu.sys                       \SystemRoot\System32\drivers\Ndu.sys                      <-- White
-  + 21 more drivers totaling 1.94 MB                                                                                  <-- DarkGray
+      2.78 MB      712 pages  Tcpip.sys                     \SystemRoot\System32\drivers\Tcpip.sys                    <-- Yellow
+      2.04 MB      522 pages  Ndu.sys                       \SystemRoot\System32\drivers\Ndu.sys                      <-- White
+  + 21 more drivers totaling 8.31 MB                                                                                  <-- DarkGray (Tail; includes drivers trimmed because < 2 MB resident)
 ```
 
 (The exact values above are illustrative; what matters is the ranked color tiering, the right-aligned numerics, the per-row bug-report identifier, and the single tail summary line.)

@@ -94,8 +94,15 @@
         <Stack Value="HeapReallocation" />
         <Stack Value="PoolAllocation" />         <!-- pool alloc stacks (Exercise 3) -->
         <Stack Value="PoolAllocationSession" />
-        <Stack Value="PoolFree" />
-        <Stack Value="PoolFreeSession" />
+        <!--
+            PoolFree / PoolFreeSession stacks intentionally NOT captured.
+            MemoryUsageChecker only reads i.Stack (the ALLOCATION stack) and
+            i.FreeTimestamp (just a nullable timestamp, captured regardless of
+            whether free-event stacks are on). Enabling pool-free stack walks
+            roughly DOUBLES the on-disk size of pool data on busy systems for
+            zero analytical benefit — long captures with pool-free stacks
+            enabled have been observed at 10+ GB. Leave them off.
+        -->
         <Stack Value="ProcessCreate" />
         <Stack Value="ThreadCreate" />
         <Stack Value="ThreadDCEnd" />
