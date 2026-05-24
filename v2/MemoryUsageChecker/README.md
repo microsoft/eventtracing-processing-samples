@@ -22,7 +22,7 @@ Open an **elevated** `cmd.exe` and run **`MemoryUsageTrace.cmd`**. The script li
 4. Reproduce the workload you want to analyze.
 5. Press any key to stop tracing.
 
-By default the trace files land in `%SystemRoot%\Tracing\`:
+By default the trace files land in the same folder as `MemoryUsageTrace.cmd` itself, so on a USB drop they stay inside the deploy folder right next to `MemoryUsageChecker.exe`:
 
 | File | Description |
 |---|---|

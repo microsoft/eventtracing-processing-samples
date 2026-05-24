@@ -2,7 +2,11 @@
 setlocal
 set scriptDirectory=%~dp0
 set wprpFileName=MemoryUsageChecker.wprp
-set traceFilesOutputPath=%SystemRoot%\Tracing
+rem Output files land next to this script. Strip the trailing backslash from
+rem %~dp0 so that "%traceFilesOutputPath%" is a clean directory path — wpr.exe
+rem -recordTempTo refuses paths whose closing quote is preceded by a backslash
+rem (CRT argv parsing treats \" as an escaped literal quote, error 0xc5586004).
+set "traceFilesOutputPath=%scriptDirectory:~0,-1%"
 set etlFileName=MemoryUsage-Trace.etl
 set traceInfoFileName=MemoryUsage-TraceInfo.txt
 set systemEventLogsFileName=MemoryUsage-System.evtx
@@ -42,8 +46,6 @@ if exist %SystemRoot%\system32\WHOAMI.EXE (
         goto End
     )
 )
-
-if not exist "%traceFilesOutputPath%" mkdir "%traceFilesOutputPath%" >nul 2>&1
 
 cls
 
