@@ -34,19 +34,73 @@ namespace MemoryUsageChecker
         /// </summary>
         private static int Main(string[] args)
         {
+            // Force UTF-8 console output so the budget-verdict glyphs
+            // ('✓' / '✗' emitted by OutputWriter.WriteOverBudget /
+            // WriteUnderBudget / WriteVerdictPass / WriteVerdictFail) render
+            // correctly in the default Windows console (code page 437/1252).
+            // Without this, OEMs reading the report on a stock command
+            // prompt see '?' boxes instead of the green/red improvement-
+            // direction glyph and the visual scan signal is lost.
+            try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* non-interactive host */ }
+
             string tracePath = null;
-            int topN = 30;
+            BudgetProfile profile = BudgetProfile.EightGb();
+            bool profileExplicit = false;
+            string profilesFileOverride = null;
+            bool writeDefaultProfilesAndExit = false;
+            string profileNameRequested = null;
+            int? topProcessesOverride = null;
+            int? topDriversOverride = null;
             int topStacks = 10;
-            double minDisplayMb = 2.0;
+            double? minDisplayMbOverride = null;
+            double? perProcessWsMbOverride = null;
+            double? perProcessVaMbOverride = null;
+            double? perDriverPoolMbOverride = null;
+            double? perDriverCodeMbOverride = null;
+            double? totalUserWsMbOverride = null;
+            double? totalDriverPoolMbOverride = null;
+            double? totalDriverCodeMbOverride = null;
             string symbolsOverride = null;
             bool noSymbols = false;
 
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
-                if (a == "--top" && i + 1 < args.Length)
+                if (a == "--profile" && i + 1 < args.Length)
                 {
-                    if (!int.TryParse(args[++i], out topN) || topN <= 0)
+                    string name = args[++i];
+                    BudgetProfile resolved = BudgetProfile.TryFromName(name);
+                    if (resolved == null)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine($"--profile must be '16gb', '8gb', or '4gb' (got '{name}').");
+                        Console.ResetColor();
+                        WaitForKeyIfInteractive();
+                        return 1;
+                    }
+                    profile = resolved;
+                    profileExplicit = true;
+                    profileNameRequested = name.Trim().ToLowerInvariant() switch
+                    {
+                        "16" => "16gb",
+                        "8" => "8gb",
+                        "4" => "4gb",
+                        _ => name.Trim().ToLowerInvariant(),
+                    };
+                }
+                else if (a == "--profiles-file" && i + 1 < args.Length)
+                {
+                    profilesFileOverride = args[++i];
+                }
+                else if (a == "--write-default-profiles")
+                {
+                    writeDefaultProfilesAndExit = true;
+                }
+                else if (a == "--top" && i + 1 < args.Length)
+                {
+                    // Back-compat: --top applies to BOTH processes and drivers.
+                    // Prefer --top-processes / --top-drivers in new scripts.
+                    if (!int.TryParse(args[++i], out int legacy) || legacy <= 0)
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
                         Console.Error.WriteLine("--top requires a positive integer.");
@@ -54,6 +108,32 @@ namespace MemoryUsageChecker
                         WaitForKeyIfInteractive();
                         return 1;
                     }
+                    topProcessesOverride = legacy;
+                    topDriversOverride = legacy;
+                }
+                else if (a == "--top-processes" && i + 1 < args.Length)
+                {
+                    if (!int.TryParse(args[++i], out int v) || v <= 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine("--top-processes requires a positive integer.");
+                        Console.ResetColor();
+                        WaitForKeyIfInteractive();
+                        return 1;
+                    }
+                    topProcessesOverride = v;
+                }
+                else if (a == "--top-drivers" && i + 1 < args.Length)
+                {
+                    if (!int.TryParse(args[++i], out int v) || v <= 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine("--top-drivers requires a positive integer.");
+                        Console.ResetColor();
+                        WaitForKeyIfInteractive();
+                        return 1;
+                    }
+                    topDriversOverride = v;
                 }
                 else if (a == "--top-stacks" && i + 1 < args.Length)
                 {
@@ -68,7 +148,7 @@ namespace MemoryUsageChecker
                 }
                 else if (a == "--min-display-mb" && i + 1 < args.Length)
                 {
-                    if (!double.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out minDisplayMb) || minDisplayMb < 0)
+                    if (!TryParseNonNegativeDouble(args[++i], out double v))
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
                         Console.Error.WriteLine("--min-display-mb requires a non-negative number (e.g. 2, 0.5, or 0 to disable filtering).");
@@ -76,6 +156,42 @@ namespace MemoryUsageChecker
                         WaitForKeyIfInteractive();
                         return 1;
                     }
+                    minDisplayMbOverride = v;
+                }
+                else if (a == "--per-process-ws-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    perProcessWsMbOverride = v;
+                }
+                else if (a == "--per-process-va-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    perProcessVaMbOverride = v;
+                }
+                else if (a == "--per-driver-pool-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    perDriverPoolMbOverride = v;
+                }
+                else if (a == "--per-driver-code-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    perDriverCodeMbOverride = v;
+                }
+                else if (a == "--total-user-ws-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    totalUserWsMbOverride = v;
+                }
+                else if (a == "--total-driver-pool-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    totalDriverPoolMbOverride = v;
+                }
+                else if (a == "--total-driver-code-budget-mb" && i + 1 < args.Length)
+                {
+                    if (!TryParseNonNegativeDouble(args[++i], out double v)) { BadBudgetArg(a); return 1; }
+                    totalDriverCodeMbOverride = v;
                 }
                 else if (a == "--symbols" && i + 1 < args.Length)
                 {
@@ -99,6 +215,105 @@ namespace MemoryUsageChecker
                     return 1;
                 }
             }
+
+            // --write-default-profiles short-circuit. Emit the canonical
+            // defaults file (either to the user-supplied path or next to
+            // the .exe) and exit. Lets OEMs regenerate the file after
+            // editing it incorrectly without having to copy from source.
+            if (writeDefaultProfilesAndExit)
+            {
+                string writePath = !string.IsNullOrEmpty(profilesFileOverride)
+                    ? profilesFileOverride
+                    : Path.Combine(AppContext.BaseDirectory ?? Directory.GetCurrentDirectory(), BudgetProfileFile.DefaultFileName);
+                try
+                {
+                    BudgetProfileFile.Save(BudgetProfileFile.BuildDefaults(), writePath);
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"Wrote default budget profiles to: {writePath}");
+                    Console.ResetColor();
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Failed to write '{writePath}': {ex.Message}");
+                    Console.ResetColor();
+                    return 1;
+                }
+            }
+
+            // Load (or seed) the user-editable budget profiles JSON shipped
+            // next to the .exe. Precedence: --profiles-file > exe-dir file >
+            // cwd file > built-in defaults. When the file is absent at the
+            // exe-dir location we seed it with the defaults so OEMs always
+            // find a self-documenting template next to MemoryUsageChecker.exe.
+            string profilesFilePath = BudgetProfileFile.ResolvePath(profilesFileOverride);
+            BudgetProfileFile.FileModel profilesFile = null;
+            string profilesFileSeededAt = null;
+            if (profilesFilePath == null && string.IsNullOrEmpty(profilesFileOverride))
+            {
+                string exeDir = AppContext.BaseDirectory;
+                if (!string.IsNullOrEmpty(exeDir))
+                {
+                    string seedPath = Path.Combine(exeDir, BudgetProfileFile.DefaultFileName);
+                    try
+                    {
+                        if (BudgetProfileFile.EnsureFile(seedPath))
+                        {
+                            profilesFileSeededAt = seedPath;
+                            profilesFilePath = seedPath;
+                        }
+                    }
+                    catch
+                    {
+                        // Seeding is best-effort - fall back to built-in defaults silently.
+                    }
+                }
+            }
+            if (profilesFilePath != null)
+            {
+                try
+                {
+                    profilesFile = BudgetProfileFile.Load(profilesFilePath);
+                    // Apply the verdict-threshold percentages globally so
+                    // Evaluate() agrees with the per-row coloring everywhere.
+                    if (profilesFile.VerdictThresholds != null)
+                    {
+                        if (profilesFile.VerdictThresholds.WarnAtPercent > 0)
+                            BudgetProfile.WarnAtPercent = profilesFile.VerdictThresholds.WarnAtPercent;
+                        if (profilesFile.VerdictThresholds.FailAtPercent > 0)
+                            BudgetProfile.FailAtPercent = profilesFile.VerdictThresholds.FailAtPercent;
+                    }
+                    // If the user didn't specify --profile, honor the file's
+                    // defaultProfile field; otherwise use what was requested
+                    // on the command line.
+                    string tierToLoad = profileExplicit
+                        ? (profileNameRequested ?? profile.Name)
+                        : (string.IsNullOrEmpty(profilesFile.DefaultProfile) ? profile.Name : profilesFile.DefaultProfile);
+                    BudgetProfile fromFile = BudgetProfileFile.ToProfile(profilesFile, tierToLoad);
+                    if (fromFile != null) profile = fromFile;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"Failed to load '{profilesFilePath}': {ex.Message}");
+                    Console.Error.WriteLine("Falling back to built-in defaults. Run with --write-default-profiles to regenerate.");
+                    Console.ResetColor();
+                }
+            }
+
+            // Apply per-flag overrides on top of the resolved tier. Any
+            // override flips the profile name to "custom" so the JSON
+            // sidecar and the executive summary honestly reflect that the
+            // budgets are no longer the canonical preset.
+            profile = ApplyOverrides(
+                profile,
+                profileExplicit,
+                topProcessesOverride, topDriversOverride,
+                minDisplayMbOverride,
+                perProcessWsMbOverride, perProcessVaMbOverride,
+                perDriverPoolMbOverride, perDriverCodeMbOverride,
+                totalUserWsMbOverride, totalDriverPoolMbOverride, totalDriverCodeMbOverride);
 
             if (tracePath == null)
             {
@@ -158,9 +373,25 @@ namespace MemoryUsageChecker
             Log.Info($"OS               : {RuntimeInformation.OSDescription} ({RuntimeInformation.OSArchitecture})");
             Log.Info($"Working directory: {Environment.CurrentDirectory}");
             Log.Info($"Args             : {string.Join(" ", args)}");
-            Log.Info($"Parsed --top     : {topN}");
+            Log.Info($"Budget profile   : {profile.Name}  (top-processes={profile.TopProcesses}, top-drivers={profile.TopDrivers})");
+            if (profilesFilePath != null)
+            {
+                Log.Info($"  Profiles file              : {profilesFilePath}{(profilesFileSeededAt != null ? "  (seeded with defaults this run)" : string.Empty)}");
+            }
+            else
+            {
+                Log.Info($"  Profiles file              : (none — using built-in defaults; create '{BudgetProfileFile.DefaultFileName}' next to the .exe to customize)");
+            }
+            Log.Info($"  Verdict thresholds         : Warn>={BudgetProfile.WarnAtPercent}% of budget, Fail>{BudgetProfile.FailAtPercent}% of budget");
+            Log.Info($"  Per-process WS budget       : {profile.PerProcessWorkingSetBudgetBytes / 1048576.0:F0} MB");
+            Log.Info($"  Per-process VA-Imp budget   : {profile.PerProcessVirtualAllocBudgetBytes / 1048576.0:F0} MB");
+            Log.Info($"  Per-driver pool budget      : {profile.PerDriverPoolBudgetBytes / 1048576.0:F0} MB");
+            Log.Info($"  Per-driver code budget      : {profile.PerDriverCodeBudgetBytes / 1048576.0:F0} MB");
+            Log.Info($"  Total user-mode WS budget   : {profile.TotalUserWorkingSetBudgetBytes / 1048576.0:F0} MB");
+            Log.Info($"  Total driver pool budget    : {profile.TotalDriverPoolBudgetBytes / 1048576.0:F0} MB");
+            Log.Info($"  Total driver code budget    : {profile.TotalDriverCodeBudgetBytes / 1048576.0:F0} MB");
             Log.Info($"Parsed --top-stacks : {topStacks}");
-            Log.Info($"Parsed --min-display-mb : {minDisplayMb:F2}");
+            Log.Info($"Parsed --min-display-mb : {profile.MinDisplayBytes / 1048576.0:F2}");
             Log.Info($"Parsed --symbols : {symbolsOverride ?? "(not specified)"}");
             Log.Info($"Parsed --no-symbols: {noSymbols}");
             try
@@ -187,6 +418,20 @@ namespace MemoryUsageChecker
                     Version = typeof(Program).Assembly.GetName().Version?.ToString(),
                     Runtime = RuntimeInformation.FrameworkDescription,
                     HostOs = $"{RuntimeInformation.OSDescription} ({RuntimeInformation.OSArchitecture})"
+                },
+                Budget = new JsonReport.BudgetInfo
+                {
+                    Profile = profile.Name,
+                    TopProcesses = profile.TopProcesses,
+                    TopDrivers = profile.TopDrivers,
+                    PerProcessWorkingSetBudgetBytes = profile.PerProcessWorkingSetBudgetBytes,
+                    PerProcessVirtualAllocBudgetBytes = profile.PerProcessVirtualAllocBudgetBytes,
+                    PerDriverPoolBudgetBytes = profile.PerDriverPoolBudgetBytes,
+                    PerDriverCodeBudgetBytes = profile.PerDriverCodeBudgetBytes,
+                    TotalUserWorkingSetBudgetBytes = profile.TotalUserWorkingSetBudgetBytes,
+                    TotalDriverPoolBudgetBytes = profile.TotalDriverPoolBudgetBytes,
+                    TotalDriverCodeBudgetBytes = profile.TotalDriverCodeBudgetBytes,
+                    MinDisplayBytes = profile.MinDisplayBytes,
                 }
             };
 
@@ -195,10 +440,13 @@ namespace MemoryUsageChecker
             {
                 using var output = new OutputWriter(resultPath)
                 {
-                    TopN = topN,
+                    TopN = Math.Max(profile.TopProcesses, profile.TopDrivers),
+                    TopProcesses = profile.TopProcesses,
+                    TopDrivers = profile.TopDrivers,
                     TopStacks = topStacks,
-                    MinDisplayBytes = (long)(minDisplayMb * 1024 * 1024),
-                    NoSymbols = noSymbols
+                    MinDisplayBytes = profile.MinDisplayBytes,
+                    NoSymbols = noSymbols,
+                    Budget = profile,
                 };
 
                 ITraceProcessorSettings settings = new TraceProcessorSettings { AllowLostEvents = true };
@@ -250,6 +498,7 @@ namespace MemoryUsageChecker
                     output.WriteHeader($"Trace Start Time:\t{metadata.StartTime}");
                     output.WriteHeader($"Trace Stop Time:\t{metadata.StopTime}");
                     output.WriteHeader($"OS / System:\t{ImageFormatter.FormatOsHeader(metadata, systemMetadata)}");
+                    output.WriteHeader($"Budget Profile:\t{profile.Name}  (per-process WS {profile.PerProcessWorkingSetBudgetBytes / 1048576.0:F0} MB, per-driver pool {profile.PerDriverPoolBudgetBytes / 1048576.0:F0} MB; image total {profile.TotalUserWorkingSetBudgetBytes / 1048576.0:F0} MB user-mode + {profile.TotalDriverPoolBudgetBytes / 1048576.0:F0} MB driver pool + {profile.TotalDriverCodeBudgetBytes / 1048576.0:F0} MB driver code)");
                     output.WriteHeader($"Result File:\t{resultPath}");
                     output.WriteHeader($"Diagnostic Log:\t{logPath}");
                     output.WriteHeader($"JSON Sidecar:\t{jsonPath}");
@@ -728,27 +977,71 @@ namespace MemoryUsageChecker
         /// <summary>Prints a one-line usage banner to stderr.</summary>
         private static void PrintUsage()
         {
-            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--top N] [--top-stacks N] [--min-display-mb V] [--symbols <path>] [--no-symbols]");
+            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--profile 16gb|8gb|4gb] [--top-processes N] [--top-drivers N]");
+            Console.Error.WriteLine("                              [--top-stacks N] [--min-display-mb V] [--per-process-ws-budget-mb V]");
+            Console.Error.WriteLine("                              [--per-process-va-budget-mb V] [--per-driver-pool-budget-mb V]");
+            Console.Error.WriteLine("                              [--per-driver-code-budget-mb V] [--total-user-ws-budget-mb V]");
+            Console.Error.WriteLine("                              [--total-driver-pool-budget-mb V] [--total-driver-code-budget-mb V]");
+            Console.Error.WriteLine("                              [--profiles-file <path>] [--write-default-profiles]");
+            Console.Error.WriteLine("                              [--symbols <path>] [--no-symbols]");
             Console.Error.WriteLine();
             Console.Error.WriteLine("When <trace.etl> is omitted (e.g. when MemoryUsageChecker.exe is launched");
             Console.Error.WriteLine("by double-clicking it in Explorer), the tool auto-selects the most recently");
             Console.Error.WriteLine("modified *.etl file located in the same folder as the .exe, preferring");
             Console.Error.WriteLine("MemoryUsage-Trace.etl (the canonical name produced by MemoryUsageTrace.cmd).");
             Console.Error.WriteLine();
-            Console.Error.WriteLine("Options:");
-            Console.Error.WriteLine("  --top N             Show up to N rows in each outer Top-N table (default 30).");
-            Console.Error.WriteLine("  --top-stacks N      Show the per-row inner stack drill-down only for the first");
-            Console.Error.WriteLine("                      N outer rows (default 10; 0 disables all per-row stack dumps).");
-            Console.Error.WriteLine("                      The outer Top-N table still lists up to --top entries.");
-            Console.Error.WriteLine("  --min-display-mb V  Hide rows below V MiB in BOTH outer Top-N tables AND inner");
-            Console.Error.WriteLine("                      Top-K bucket / stack rows (default 2; pass 0 to disable");
-            Console.Error.WriteLine("                      filtering and show every row).");
+            Console.Error.WriteLine("Budget profile (use the preset, then override individual knobs if you want):");
+            Console.Error.WriteLine("  --profile 16gb|8gb|4gb   Pick a calibrated tier for the target device class.");
+            Console.Error.WriteLine("                           Default is '8gb' (override via the defaultProfile field");
+            Console.Error.WriteLine("                           in MemoryUsageChecker.profiles.json).");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("                       16gb tier defaults:           8gb tier defaults:           4gb tier defaults:");
+            Console.Error.WriteLine("                         Per-process WS    400 MB      Per-process WS    200 MB      Per-process WS    100 MB");
+            Console.Error.WriteLine("                         Per-process VA    200 MB      Per-process VA    100 MB      Per-process VA     50 MB");
+            Console.Error.WriteLine("                         Per-driver pool    10 MB      Per-driver pool     5 MB      Per-driver pool     2 MB");
+            Console.Error.WriteLine("                         Per-driver code     4 MB      Per-driver code     2 MB      Per-driver code     1 MB");
+            Console.Error.WriteLine("                         Total user WS   3072 MB      Total user WS   1536 MB      Total user WS    750 MB");
+            Console.Error.WriteLine("                         Total driver pool 512 MB      Total driver pool 256 MB      Total driver pool 128 MB");
+            Console.Error.WriteLine("                         Total driver code 128 MB      Total driver code  64 MB      Total driver code  32 MB");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Editable defaults file (shipped next to the .exe; loaded automatically on every run):");
+            Console.Error.WriteLine("  --profiles-file <path>    Override the path to MemoryUsageChecker.profiles.json.");
+            Console.Error.WriteLine("                            Default lookup: <exe folder>\\MemoryUsageChecker.profiles.json,");
+            Console.Error.WriteLine("                            then the current directory. If absent the file is seeded with");
+            Console.Error.WriteLine("                            built-in defaults so an OEM can edit it without source access.");
+            Console.Error.WriteLine("  --write-default-profiles  Write a fresh defaults file to the path above and exit.");
+            Console.Error.WriteLine("                            Use this to restore the file after a bad edit.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Display + filter:");
+            Console.Error.WriteLine("  --top-processes N   User-mode process rows in each Top-N table (default 15).");
+            Console.Error.WriteLine("  --top-drivers N     Driver rows in each Top-N table (default 10).");
+            Console.Error.WriteLine("  --top N             Back-compat alias: applies N to BOTH processes and drivers.");
+            Console.Error.WriteLine("  --top-stacks N      Per-row inner stack drill-down shown only for the first N");
+            Console.Error.WriteLine("                      outer rows (default 10; 0 disables all drill-downs).");
+            Console.Error.WriteLine("  --min-display-mb V  Hide rows below V MiB (default 4 on 16gb, 2 on 8gb, 1 on 4gb).");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Per-item & total budget overrides (override the profile preset; switches profile to 'custom'):");
+            Console.Error.WriteLine("  --per-process-ws-budget-mb V    Per-process Active working-set ceiling (Exercise 1).");
+            Console.Error.WriteLine("  --per-process-va-budget-mb V    Per-process VirtualAlloc Impacting ceiling (Exercise 2).");
+            Console.Error.WriteLine("  --per-driver-pool-budget-mb V   Per-driver NonPaged-pool Impacting ceiling (Exercise 3A).");
+            Console.Error.WriteLine("  --per-driver-code-budget-mb V   Per-driver code-resident footprint ceiling (Exercise 3B).");
+            Console.Error.WriteLine("  --total-user-ws-budget-mb V     Whole-image user-mode WS ceiling (Exercise 1 PASS/FAIL).");
+            Console.Error.WriteLine("  --total-driver-pool-budget-mb V Whole-image driver NP-pool ceiling (Exercise 3A PASS/FAIL).");
+            Console.Error.WriteLine("  --total-driver-code-budget-mb V Whole-image driver code ceiling (Exercise 3B PASS/FAIL).");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Symbols:");
             Console.Error.WriteLine("  --symbols <path>    Override the symbol search path passed to the EventTracing SDK.");
             Console.Error.WriteLine("                      Used as-is; assumed to already declare a downstream cache.");
             Console.Error.WriteLine("  --no-symbols        Skip symbol load entirely. Per-row stack drill-downs in");
             Console.Error.WriteLine("                      Exercises 2 and 3 are also suppressed because raw addresses");
             Console.Error.WriteLine("                      are not actionable; outer Top-N tables and the executive");
             Console.Error.WriteLine("                      summary are still produced.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Color-coded improvement direction (printed on every per-item and per-category line):");
+            Console.Error.WriteLine("  Red    '✗'  Row / total exceeds its budget — must be shrunk to fit the active tier.");
+            Console.Error.WriteLine("  Yellow '!'  Row / total is at 80–100% of its budget — watch / reduce if possible.");
+            Console.Error.WriteLine("  Green  '✓'  Row / total is healthy (well under budget). Image-fit PASS uses the same glyph.");
+            Console.Error.WriteLine("  (Warn/Fail percentages above are tunable in the profiles.json 'verdictThresholds' block.)");
             Console.Error.WriteLine();
             Console.Error.WriteLine("Symbol caching (so repeat runs don't re-download):");
             Console.Error.WriteLine("  PDB cache (default): %LOCALAPPDATA%\\SymbolCache");
@@ -760,6 +1053,96 @@ namespace MemoryUsageChecker
             Console.Error.WriteLine("    writable (non-admin). Override with _NT_SYMCACHE_PATH.");
             Console.Error.WriteLine("  Both paths and their pre-existing sizes are printed at startup so you can");
             Console.Error.WriteLine("  see cache hits.");
+        }
+
+        /// <summary>
+        /// Parses a non-negative invariant-culture <see cref="double"/>.
+        /// Wraps the <see cref="double.TryParse(string, System.Globalization.NumberStyles, IFormatProvider, out double)"/>
+        /// boilerplate so the per-budget flag handlers stay one-line.
+        /// </summary>
+        private static bool TryParseNonNegativeDouble(string raw, out double value)
+        {
+            if (double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value) && value >= 0)
+            {
+                return true;
+            }
+            value = 0;
+            return false;
+        }
+
+        /// <summary>
+        /// Emits a uniform "this flag requires a non-negative MB value"
+        /// error to stderr. Centralised so every per-budget flag handler
+        /// produces the same wording (and the caller stays a 1-liner).
+        /// </summary>
+        private static void BadBudgetArg(string flag)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.Error.WriteLine($"{flag} requires a non-negative number (in MB, e.g. 200 or 0.5).");
+            Console.ResetColor();
+            WaitForKeyIfInteractive();
+        }
+
+        /// <summary>
+        /// Materialises the effective <see cref="BudgetProfile"/> by
+        /// layering each command-line override onto the resolved preset.
+        /// If any override is present, the returned profile's
+        /// <see cref="BudgetProfile.Name"/> is flipped to <c>"custom"</c>
+        /// so downstream consumers (executive summary, JSON sidecar)
+        /// don't claim a canonical tier when the budgets have been
+        /// modified.
+        /// </summary>
+        private static BudgetProfile ApplyOverrides(
+            BudgetProfile baseProfile,
+            bool profileExplicit,
+            int? topProcesses,
+            int? topDrivers,
+            double? minDisplayMb,
+            double? perProcWsMb,
+            double? perProcVaMb,
+            double? perDrvPoolMb,
+            double? perDrvCodeMb,
+            double? totalUserWsMb,
+            double? totalDrvPoolMb,
+            double? totalDrvCodeMb)
+        {
+            bool anyOverride =
+                topProcesses.HasValue || topDrivers.HasValue || minDisplayMb.HasValue ||
+                perProcWsMb.HasValue || perProcVaMb.HasValue ||
+                perDrvPoolMb.HasValue || perDrvCodeMb.HasValue ||
+                totalUserWsMb.HasValue || totalDrvPoolMb.HasValue || totalDrvCodeMb.HasValue;
+            if (!anyOverride) return baseProfile;
+
+            // Preserve the preset name when only --top-processes / --top-drivers
+            // were overridden, because those don't change the *budget* — they
+            // only change how many rows are displayed. Any actual budget
+            // override flips the name to "custom".
+            bool budgetTouched =
+                perProcWsMb.HasValue || perProcVaMb.HasValue ||
+                perDrvPoolMb.HasValue || perDrvCodeMb.HasValue ||
+                totalUserWsMb.HasValue || totalDrvPoolMb.HasValue || totalDrvCodeMb.HasValue ||
+                minDisplayMb.HasValue;
+
+            string newName = budgetTouched
+                ? (profileExplicit ? $"custom (base: {baseProfile.Name})" : "custom")
+                : baseProfile.Name;
+
+            long MbToBytes(double mb) => (long)(mb * 1024 * 1024);
+
+            return baseProfile with
+            {
+                Name = newName,
+                TopProcesses = topProcesses ?? baseProfile.TopProcesses,
+                TopDrivers = topDrivers ?? baseProfile.TopDrivers,
+                MinDisplayBytes = minDisplayMb.HasValue ? MbToBytes(minDisplayMb.Value) : baseProfile.MinDisplayBytes,
+                PerProcessWorkingSetBudgetBytes = perProcWsMb.HasValue ? MbToBytes(perProcWsMb.Value) : baseProfile.PerProcessWorkingSetBudgetBytes,
+                PerProcessVirtualAllocBudgetBytes = perProcVaMb.HasValue ? MbToBytes(perProcVaMb.Value) : baseProfile.PerProcessVirtualAllocBudgetBytes,
+                PerDriverPoolBudgetBytes = perDrvPoolMb.HasValue ? MbToBytes(perDrvPoolMb.Value) : baseProfile.PerDriverPoolBudgetBytes,
+                PerDriverCodeBudgetBytes = perDrvCodeMb.HasValue ? MbToBytes(perDrvCodeMb.Value) : baseProfile.PerDriverCodeBudgetBytes,
+                TotalUserWorkingSetBudgetBytes = totalUserWsMb.HasValue ? MbToBytes(totalUserWsMb.Value) : baseProfile.TotalUserWorkingSetBudgetBytes,
+                TotalDriverPoolBudgetBytes = totalDrvPoolMb.HasValue ? MbToBytes(totalDrvPoolMb.Value) : baseProfile.TotalDriverPoolBudgetBytes,
+                TotalDriverCodeBudgetBytes = totalDrvCodeMb.HasValue ? MbToBytes(totalDrvCodeMb.Value) : baseProfile.TotalDriverCodeBudgetBytes,
+            };
         }
 
         /// <summary>

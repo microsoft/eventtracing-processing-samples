@@ -6,7 +6,7 @@ A v2 sample that consumes a single ETL trace and emits a color-coded analysis co
 - [Exercise 2 — VirtualAlloc + Heap](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/memory-footprint-optimization-exercise-2)
 - [Exercise 3 — Pool + driver code footprint](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/memory-footprint-optimization-exercise-3)
 
-Each exercise runs independently. Sections whose required providers were not captured are clearly marked as `[skipped - ...]` and the rest of the analysis continues. Lists are sorted descending by memory size, and the largest offenders are highlighted in red so a tester or IHV can spot the worst hotspot at a glance and paste the row directly into a bug report.
+Each exercise runs independently. Sections whose required providers were not captured are clearly marked as `[skipped - ...]` and the rest of the analysis continues. Lists are sorted descending by memory size and **colored by improvement direction against per-item budgets** — rows that exceed the tier's per-item budget are painted **red `✗`** with an explicit `→ trim ≥ X MB to fit Y MB` suffix, rows in the 80–100 % near-budget band are **yellow `!`**, and healthy rows are **green `✓`**. Each per-category total (user-mode WS, driver NP-pool, driver code) also ends with a one-line **`✓ PASS` / `! WATCH` / `✗ FAIL`** banner so a tester or OEM can paste the row — or the executive summary — directly into a bug report.
 
 ## 1. Collecting a trace
 
@@ -84,19 +84,105 @@ Capture with **Logging mode = File** and save the resulting `.etl` to disk.
 ## 2. Running the sample
 
 ```
-MemoryUsageChecker.exe [<trace.etl>] [--top N] [--top-stacks N] [--min-display-mb V] [--symbols <path>] [--no-symbols]
+MemoryUsageChecker.exe [<trace.etl>]
+    [--profile 16gb|8gb|4gb]
+    [--top-processes N] [--top-drivers N] [--top-stacks N]
+    [--per-process-ws-budget-mb V]   [--per-process-va-budget-mb V]
+    [--per-driver-pool-budget-mb V]  [--per-driver-code-budget-mb V]
+    [--total-user-ws-budget-mb V]
+    [--total-driver-pool-budget-mb V] [--total-driver-code-budget-mb V]
+    [--min-display-mb V]
+    [--profiles-file <path>] [--write-default-profiles]
+    [--symbols <path>] [--no-symbols]
+    [--top N]   # legacy alias = --top-processes N AND --top-drivers N
 ```
 
 When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by **double-clicking** it in Explorer), the tool auto-selects the most recently modified `*.etl` file located in the **same folder as the .exe**, preferring `MemoryUsage-Trace.etl` (the canonical name produced by `MemoryUsageTrace.cmd`). The selected path is printed in cyan before processing starts. This makes the canonical one-folder workflow — collect with `MemoryUsageTrace.cmd`, analyze by double-clicking `MemoryUsageChecker.exe` — work without ever opening a shell.
 
+### 2.1 Budget profiles (default `8gb`)
+
+The tool is calibrated for OEM/ODM teams who must validate that their preload (apps + drivers) fits a Windows image into a target device class — **16 GB** (relaxed ceiling), **8 GB** (default), or **4 GB** (tightest). Pick the tier with **`--profile`**; every per-item and per-category budget below derives from it.
+
+| Knob                                | `--profile 16gb` | `--profile 8gb` (default) | `--profile 4gb` | Source flag                          |
+| ----------------------------------- | ---------------- | ------------------------- | --------------- | ------------------------------------ |
+| Top-N processes                     | 15               | 15                        | 15              | `--top-processes`                    |
+| Top-N drivers                       | 10               | 10                        | 10              | `--top-drivers`                      |
+| Per-process Active WS budget        | 400 MB           | 200 MB                    | 100 MB          | `--per-process-ws-budget-mb`         |
+| Per-process VirtualAlloc Impacting  | 200 MB           | 100 MB                    | 50 MB           | `--per-process-va-budget-mb`         |
+| Per-driver NonPaged-pool Impacting  | 10 MB            | 5 MB                      | 2 MB            | `--per-driver-pool-budget-mb`        |
+| Per-driver code-resident footprint  | 4 MB             | 2 MB                      | 1 MB            | `--per-driver-code-budget-mb`        |
+| **Total** user-mode Active WS       | 3072 MB          | 1536 MB                   | 750 MB          | `--total-user-ws-budget-mb`          |
+| **Total** driver NonPaged-pool      | 512 MB           | 256 MB                    | 128 MB          | `--total-driver-pool-budget-mb`      |
+| **Total** driver code resident      | 128 MB           | 64 MB                     | 32 MB           | `--total-driver-code-budget-mb`      |
+| `--min-display-mb` floor            | 4 MB             | 2 MB                      | 1 MB            | `--min-display-mb`                   |
+
+Any individual `--…-budget-mb` flag overrides the tier-supplied value. When you override anything, the report header shows `Budget Profile: custom (base: 8gb)` so you can tell at a glance the run is no longer a tier-vs-tier comparable.
+
+The defaults were calibrated against a real Windows 11 24H2 reference trace:
+
+* Process Active WS distribution has its knee at rank ≈ **15** (top-15 covers **69 %** of attributable bytes).
+* Driver NonPaged-pool distribution has its knee at rank ≈ **10** (top-10 covers **92 %** of pool bytes; only 17 drivers ever hit 2 MB).
+* Driver code-resident footprint has only 3 drivers ≥ 2 MB; top-15 covers everything actionable.
+
+### 2.2 `MemoryUsageChecker.profiles.json` — the editable defaults file
+
+**A `MemoryUsageChecker.profiles.json` file ships in the release drop next to `MemoryUsageChecker.exe`**. It carries every number the tool uses — all three tiers' per-item budgets, per-category totals, Top-N values, the `--min-display-mb` floor, *and* the warn / fail verdict percentages. Open it in Notepad (or any text editor) to retune the image-fit verdict; the **next run picks up the changes automatically** without any command-line argument or `--help` lookup. This is the recommended workflow for OEMs / ODMs who only ever double-click the .exe to load the latest ETL.
+
+Skeleton:
+
+```json
+{
+  "schemaVersion": "1.0",
+  "defaultProfile": "8gb",
+  "verdictThresholds": { "warnAtPercent": 80, "failAtPercent": 100 },
+  "profiles": {
+    "16gb": { "perProcessWorkingSetBudgetMb": 400, "totalUserWorkingSetBudgetMb": 3072, ... },
+    "8gb":  { "perProcessWorkingSetBudgetMb": 200, "totalUserWorkingSetBudgetMb": 1536, ... },
+    "4gb":  { "perProcessWorkingSetBudgetMb": 100, "totalUserWorkingSetBudgetMb":  750, ... }
+  }
+}
+```
+
+Lookup precedence at startup:
+
+1. `--profiles-file <path>` if passed on the command line.
+2. `MemoryUsageChecker.profiles.json` in the **same folder as the .exe** (the location the release drop ships it to).
+3. `MemoryUsageChecker.profiles.json` in the **current working directory**.
+4. (none — built-in defaults baked into the .exe.)
+
+If the file is absent at the exe-dir location, the .exe **seeds a fresh copy** with the canonical defaults on first run, so OEMs always find an editable template even when they extract the .exe out of the release drop on its own. To restore the file to defaults after a bad edit, delete it and re-run, **or** run `MemoryUsageChecker.exe --write-default-profiles` (writes to the exe-dir location; pass `--profiles-file <path>` to redirect).
+
+The defaults file is also the canonical answer to "what threshold turns this row red?" — the `verdictThresholds.failAtPercent` (default `100`) and `verdictThresholds.warnAtPercent` (default `80`) fields gate every per-row colour and every per-category PASS / WATCH / FAIL banner; the rule is `actual > failAt% × budget = Fail; actual ≥ warnAt% × budget = Warn; else Pass`.
+
+### 2.3 Improvement-direction color legend
+
+Every Top-N row is coloured by **how it stacks up against the active per-item budget** (and the per-category total gets a single PASS / FAIL banner). The colors are the only place to look:
+
+| Glyph & color   | Meaning                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------- |
+| `✗` red row     | **Over budget** (> 100 % of per-item ceiling). Row also gets a `→ trim ≥ X MB to fit Y MB` suffix.             |
+| `!` yellow row  | **Near budget** (80–100 % of per-item ceiling). Watch / reduce if you can.                                     |
+| `✓` green row   | Under budget — healthy.                                                                                        |
+| `✓ PASS` line   | Category total is at or under the tier's whole-image budget.                                                   |
+| `! WATCH` line  | Category total is in the 80–100 % band of the tier budget — borderline.                                        |
+| `✗ FAIL` line   | Category total exceeds the tier budget. The line shows the exact MB-gap to close.                              |
+
+The `100 %` / `80 %` thresholds are themselves tunable in the JSON `verdictThresholds` block (see [§2.2](#22-memoryusagecheckerprofilesjson--the-editable-defaults-file)). PASS / WATCH / FAIL category lines also appear in the **executive summary** under `--- Image-Fit Verdict (<profile>) ---`, so you can paste a 6-line digest into a bug report and tell at a glance whether the image fits the tier.
+
+### 2.4 Other arguments
+
 | Argument | Default | Description |
 |---|---|---|
 | `<trace.etl>` | auto-discovered next to the .exe | Path to the ETL file. Omit to use the most recent `*.etl` sitting next to `MemoryUsageChecker.exe`. |
-| `--top N` | `30` | Caps the number of rows displayed per **outer Top-N table** (top processes, top drivers). |
-| `--top-stacks N` | `10` | Caps how many of the outer Top-N rows get the verbose **inner stack drill-down** (per-process commit stacks, per-driver pool stacks, per-pool-tag breakdown). The outer table still lists up to `--top` entries; only the drill-down is capped. Pass `0` to suppress all drill-downs. |
-| `--min-display-mb V` | `2` | Hides rows below **V MiB** in **both** the **outer Top-N tables** (top processes, top drivers) **and** the inner Top-K bucket / stack rows (e.g. the tiny `KernelStack`, `UserStack`, `WorkingSetMetadata` slivers under a process, sub-2 MB commit-stack rows, and per-pool-tag rows) in the text report and the JSON sidecar. Pass `0` to disable filtering and emit every row. The "+ N more …" tail summary lines always account for the full tail so nothing is lost — only the sub-threshold rows are trimmed from the displayed lists. The active filter is shown in each outer Top-N sub-header (e.g. `Top 30 processes by Active working set (MB) (>= 2 MB):`) so the reader can tell at a glance why the table is shorter than `--top N`. |
+| `--top-processes N` | `15` | Caps the number of rows displayed in the **process** Top-N tables (Exercise 1 Active WS, Exercise 2 VirtualAlloc/heap). |
+| `--top-drivers N` | `10` | Caps the number of rows displayed in the **driver** Top-N tables (Exercise 1 driver-locked, Exercise 3 pool and code footprint). |
+| `--top-stacks N` | `10` | Caps how many of the outer Top-N rows get the verbose **inner stack drill-down**. Pass `0` to suppress all drill-downs. |
+| `--min-display-mb V` | tier-dependent (4 / 2 / 1) | Hides rows below **V MiB** in **both** the outer Top-N tables **and** the inner Top-K bucket / stack rows. Pass `0` to disable filtering. The `+ N more …` tail summary always accounts for the full tail so nothing is lost. The active filter is shown in each Top-N sub-header. |
+| `--profiles-file <path>` | exe-dir → cwd lookup | Override the path to `MemoryUsageChecker.profiles.json`. Useful when you keep one canonical profiles file in a shared location and want every machine to load it. |
+| `--write-default-profiles` | (off) | Write a fresh canonical defaults JSON to the resolved path and exit. Use this to restore the file after a bad manual edit (or to seed it in a new location specified with `--profiles-file`). |
 | `--symbols <path>` | (see below) | Override the symbol search path. Accepts any `symsrv`-compatible string, including `SRV*<cache>*<server>`. |
 | `--no-symbols` | (off) | Skip symbol resolution. Outer Top-N tables, the per-pool-tag breakdown, the executive summary, and the JSON sidecar are still emitted, but the per-row stack drill-down subsections in Exercises 2 and 3 are suppressed (raw `module!0xRVA` addresses are not actionable — re-run without `--no-symbols` to see them). |
+| `--top N` | (none) | Legacy alias — equivalent to setting `--top-processes N` **and** `--top-drivers N` together. New scripts should use the split flags. |
 
 Symbol-path resolution precedence (when `--no-symbols` is not specified):
 

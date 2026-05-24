@@ -32,8 +32,6 @@ namespace MemoryUsageChecker
     /// </remarks>
     internal static class Exercise2_VirtualAllocHeap
     {
-        private const long NotableImpactingBytes = 10L * 1024 * 1024; // 10 MB
-
         /// <summary>
         /// Runs Exercise 2. See class summary for the full analysis the method performs.
         /// </summary>
@@ -105,7 +103,7 @@ namespace MemoryUsageChecker
 
             var perProcess = allPerProcess
                 .Where(x => x.Impacting >= output.MinDisplayBytes)
-                .Take(output.TopN)
+                .Take(output.TopProcesses)
                 .ToList();
 
             JsonReport.Exercise2VirtualAlloc jsonVa = null;
@@ -115,21 +113,13 @@ namespace MemoryUsageChecker
                 jsonSection.VirtualAlloc = jsonVa;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} processes by Impacting commit size (MB){output.MinDisplaySuffix}:");
+            output.WriteSubHeader($"Top {output.TopProcesses} processes by Impacting commit size (MB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in perProcess)
             {
                 rank++;
                 string line = $"  {ImageFormatter.FormatProcess(row.Process)}  Impacting {row.Impacting / 1048576.0,8:F2}  Transient {row.Transient / 1048576.0,8:F2}  Total {row.Total / 1048576.0,8:F2}  MB";
-                if (row.Impacting >= NotableImpactingBytes)
-                {
-                    // Override the rank-based tier: threshold breach forces red.
-                    output.WriteCritical(line);
-                }
-                else
-                {
-                    output.WriteRanked(rank, perProcess.Count, line);
-                }
+                BudgetVerdict verdict = output.WriteRowAgainstBudget(rank, perProcess.Count, row.Impacting, output.Budget.PerProcessVirtualAllocBudgetBytes, line);
 
                 if (jsonVa != null)
                 {
@@ -140,6 +130,7 @@ namespace MemoryUsageChecker
                         ImpactingBytes = row.Impacting,
                         TransientBytes = row.Transient,
                         TotalBytes = row.Total,
+                        BudgetVerdict = verdict.ToString().ToLowerInvariant(),
                         TopImpactingStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK, output.MinDisplayBytes),
                         TopTransientStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK, output.MinDisplayBytes)
                     });
@@ -242,7 +233,7 @@ namespace MemoryUsageChecker
 
             var perProcessSummary = allPerProcessSummary
                 .Where(x => x.OutstandingBytes >= output.MinDisplayBytes)
-                .Take(output.TopN)
+                .Take(output.TopProcesses)
                 .ToList();
 
             JsonReport.Exercise2Heap jsonHeap = null;
@@ -252,7 +243,7 @@ namespace MemoryUsageChecker
                 jsonSection.Heap = jsonHeap;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} processes by outstanding heap size (KB){output.MinDisplaySuffix}:");
+            output.WriteSubHeader($"Top {output.TopProcesses} processes by outstanding heap size (KB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in perProcessSummary)
             {

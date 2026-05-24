@@ -153,11 +153,11 @@ namespace MemoryUsageChecker
                 return;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} processes by Active working set (MB){output.MinDisplaySuffix}:");
+            output.WriteSubHeader($"Top {output.TopProcesses} processes by Active working set (MB){output.MinDisplaySuffix}:");
 
             var topProcesses = allActiveByProcess
                 .Where(x => x.TotalBytes >= output.MinDisplayBytes)
-                .Take(output.TopN)
+                .Take(output.TopProcesses)
                 .ToList();
 
             int rank = 0;
@@ -166,7 +166,7 @@ namespace MemoryUsageChecker
                 rank++;
                 double totalMb = row.TotalBytes / 1024.0 / 1024.0;
                 string line = $"  {ImageFormatter.FormatProcess(row.Process)}  {totalMb,10:F2} MB";
-                output.WriteRanked(rank, topProcesses.Count, line);
+                output.WriteRowAgainstBudget(rank, topProcesses.Count, row.TotalBytes, output.Budget.PerProcessWorkingSetBudgetBytes, line);
 
                 JsonReport.RankedProcessActive jsonRow = null;
                 if (jsonSnapshot != null)
@@ -176,7 +176,8 @@ namespace MemoryUsageChecker
                         Rank = rank,
                         Process = ImageFormatter.BuildProcessIdentity(row.Process),
                         TotalBytes = row.TotalBytes,
-                        TotalMegabytes = totalMb
+                        TotalMegabytes = totalMb,
+                        BudgetVerdict = BudgetProfile.Evaluate(row.TotalBytes, output.Budget.PerProcessWorkingSetBudgetBytes).ToString().ToLowerInvariant(),
                     };
                     jsonSnapshot.TopProcessesByActiveWorkingSet.Add(jsonRow);
                 }
@@ -195,6 +196,7 @@ namespace MemoryUsageChecker
             }
 
             // Tail summary
+            long totalUserModeBytes = allActiveByProcess.Sum(x => x.TotalBytes);
             if (allActiveByProcess.Count > topProcesses.Count)
             {
                 int tailCount = allActiveByProcess.Count - topProcesses.Count;
@@ -210,6 +212,19 @@ namespace MemoryUsageChecker
                         Megabytes = tailMb
                     };
                 }
+            }
+
+            // Image-fit verdict: sum of every named-process Active WS vs the
+            // active tier's whole-image budget. Emitted INSIDE Exercise 1 so
+            // an OEM scanning the report can see PASS/FAIL right under the
+            // ranked table, not just at the bottom of the executive summary.
+            output.WriteBlank();
+            BudgetVerdict imageVerdict = output.WriteCategoryVerdict("Image-fit (total user-mode Active WS)", totalUserModeBytes, output.Budget.TotalUserWorkingSetBudgetBytes);
+            if (jsonSnapshot != null)
+            {
+                jsonSnapshot.TotalUserModeActiveBytes = totalUserModeBytes;
+                jsonSnapshot.TotalUserModeBudgetBytes = output.Budget.TotalUserWorkingSetBudgetBytes;
+                jsonSnapshot.TotalUserModeBudgetVerdict = imageVerdict.ToString().ToLowerInvariant();
             }
         }
 
@@ -244,7 +259,7 @@ namespace MemoryUsageChecker
 
             var topDrivers = allByDriver
                 .Where(x => x.Bytes >= output.MinDisplayBytes)
-                .Take(output.TopN)
+                .Take(output.TopDrivers)
                 .ToList();
 
             // When the only thing that survives the filter is "(unknown)" we
@@ -267,7 +282,7 @@ namespace MemoryUsageChecker
                 return;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} driver-locked non-paged contributors (MB){output.MinDisplaySuffix}:");
+            output.WriteSubHeader($"Top {output.TopDrivers} driver-locked non-paged contributors (MB){output.MinDisplaySuffix}:");
 
             int rank = 0;
             foreach (var row in topDrivers)

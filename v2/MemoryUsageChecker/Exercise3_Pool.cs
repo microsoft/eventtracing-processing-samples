@@ -37,8 +37,6 @@ namespace MemoryUsageChecker
     /// </remarks>
     internal static class Exercise3_Pool
     {
-        private const long NotableNonPagedBytes = 1L * 1024 * 1024; // 1 MB
-        private const long NotableDriverCodeBytes = 2L * 1024 * 1024; // 2 MB
         private const long PageSizeBytes = 4096;
         private const string KernelInternalBucket = "(kernel-internal)";
 
@@ -114,9 +112,10 @@ namespace MemoryUsageChecker
         /// allocation stack (the responsible driver), ranks drivers by
         /// outstanding non-paged bytes, and for the top drivers prints
         /// per-driver top stacks plus a per-pool-tag breakdown for the #1
-        /// offender. Crosses the
-        /// <see cref="NotableNonPagedBytes"/> threshold renders red
-        /// regardless of rank to draw the eye to absolute leaks.
+        /// offender. Per-driver rows are colored by the active
+        /// <see cref="BudgetProfile.PerDriverPoolBudgetBytes"/>: rows
+        /// exceeding the budget are painted red with a "✗ trim ≥ X MB"
+        /// suffix so the OEM sees the exact shrink target inline.
         /// </summary>
         private static void RunPoolPart(OutputWriter output, IPendingResult<IPoolAllocationDataSource> pendingPool, JsonReport.Exercise3Section jsonSection)
         {
@@ -276,7 +275,7 @@ namespace MemoryUsageChecker
 
             var perDriver = allPerDriver
                 .Where(x => x.Acc.NonPagedImpacting >= output.MinDisplayBytes)
-                .Take(output.TopN)
+                .Take(output.TopDrivers)
                 .ToList();
 
             // Release per-interval references for drivers that didn't make the
@@ -298,7 +297,7 @@ namespace MemoryUsageChecker
                 jsonSection.PoolAllocations = jsonPool;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} drivers by NonPaged Impacting size (KB){output.MinDisplaySuffix}:");
+            output.WriteSubHeader($"Top {output.TopDrivers} drivers by NonPaged Impacting size (KB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in perDriver)
             {
@@ -308,15 +307,7 @@ namespace MemoryUsageChecker
                 string line =
                     $"  {driverLabel,-60}  NP-Imp {acc.NonPagedImpacting / 1024.0,9:F1}  NP-Tr {acc.NonPagedTransient / 1024.0,9:F1}  " +
                     $"P-Imp {acc.PagedImpacting / 1024.0,9:F1}  P-Tr {acc.PagedTransient / 1024.0,9:F1}  KB  ({acc.AllocCount} allocs)";
-                if (acc.NonPagedImpacting >= NotableNonPagedBytes)
-                {
-                    // Threshold breach — force red regardless of rank.
-                    output.WriteCritical(line);
-                }
-                else
-                {
-                    output.WriteRanked(rank, perDriver.Count, line);
-                }
+                BudgetVerdict verdict = output.WriteRowAgainstBudget(rank, perDriver.Count, acc.NonPagedImpacting, output.Budget.PerDriverPoolBudgetBytes, line);
 
                 if (jsonPool != null)
                 {
@@ -329,6 +320,7 @@ namespace MemoryUsageChecker
                         PagedImpactingBytes = acc.PagedImpacting,
                         PagedTransientBytes = acc.PagedTransient,
                         AllocationCount = acc.AllocCount,
+                        BudgetVerdict = verdict.ToString().ToLowerInvariant(),
                         TopImpactingStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
                             acc.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
                                          .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
@@ -343,6 +335,7 @@ namespace MemoryUsageChecker
                 }
             }
             // Tail summary for drivers
+            long totalNpImpactingBytes = allPerDriver.Sum(x => x.Acc.NonPagedImpacting);
             if (allPerDriver.Count > perDriver.Count)
             {
                 int tailCount = allPerDriver.Count - perDriver.Count;
@@ -358,6 +351,16 @@ namespace MemoryUsageChecker
                         Megabytes = tailBytes / 1048576.0
                     };
                 }
+            }
+
+            // Image-fit verdict for the driver NonPaged-pool category.
+            output.WriteBlank();
+            BudgetVerdict poolImageVerdict = output.WriteCategoryVerdict("Image-fit (total driver NonPaged-pool)", totalNpImpactingBytes, output.Budget.TotalDriverPoolBudgetBytes);
+            if (jsonPool != null)
+            {
+                jsonPool.TotalNonPagedImpactingBytes = totalNpImpactingBytes;
+                jsonPool.TotalNonPagedBudgetBytes = output.Budget.TotalDriverPoolBudgetBytes;
+                jsonPool.TotalNonPagedBudgetVerdict = poolImageVerdict.ToString().ToLowerInvariant();
             }
             output.WriteBlank();
 
@@ -505,8 +508,10 @@ namespace MemoryUsageChecker
         /// joins it with the union of <see cref="IProcess.Images"/> across
         /// every process so the leaf file name can be enriched with the
         /// driver's friendly name and version, then ranks drivers by
-        /// resident code-page bytes. Crosses the
-        /// <see cref="NotableDriverCodeBytes"/> threshold renders red.
+        /// resident code-page bytes. Per-driver rows are colored by the
+        /// active <see cref="BudgetProfile.PerDriverCodeBudgetBytes"/>
+        /// budget, and a final image-fit PASS/FAIL verdict is emitted for
+        /// the total code-footprint category.
         /// </summary>
         private static void RunDriverCodeFootprintPart(
             OutputWriter output,
@@ -572,7 +577,7 @@ namespace MemoryUsageChecker
 
             var displayed = allByDriver
                 .Where(x => x.Bytes >= output.MinDisplayBytes)
-                .Take(output.TopN)
+                .Take(output.TopDrivers)
                 .ToList();
 
             if (displayed.Count == 0)
@@ -594,31 +599,26 @@ namespace MemoryUsageChecker
                 jsonSection.DriverCodeFootprint = jsonFootprint;
             }
 
-            output.WriteSubHeader($"Top {output.TopN} drivers by code resident footprint (MB){output.MinDisplaySuffix}:");
+            output.WriteSubHeader($"Top {output.TopDrivers} drivers by code resident footprint (MB){output.MinDisplaySuffix}:");
             int rank = 0;
             foreach (var row in displayed)
             {
                 rank++;
                 string identifier = ImageFormatter.FormatDriverRow(row.Image, row.Leaf, row.Path);
                 string line = $"  {row.Mb,8:F2} MB  {row.PageCount,7} pages  {identifier}";
-                if (row.Bytes >= NotableDriverCodeBytes)
-                {
-                    output.WriteCritical(line);
-                }
-                else
-                {
-                    output.WriteRanked(rank, displayed.Count, line);
-                }
+                BudgetVerdict verdict = output.WriteRowAgainstBudget(rank, displayed.Count, row.Bytes, output.Budget.PerDriverCodeBudgetBytes, line);
 
                 jsonFootprint?.TopDriversByResidentBytes.Add(new JsonReport.RankedDriverFootprint
                 {
                     Rank = rank,
                     Driver = ImageFormatter.BuildDriverIdentity(row.Image, row.Leaf, row.Path),
-                    ResidentBytes = row.Bytes
+                    ResidentBytes = row.Bytes,
+                    BudgetVerdict = verdict.ToString().ToLowerInvariant(),
                 });
             }
 
             // Tail summary
+            long totalDriverCodeBytes = allByDriver.Sum(x => x.Bytes);
             if (allByDriver.Count > displayed.Count)
             {
                 int tailCount = allByDriver.Count - displayed.Count;
@@ -634,6 +634,16 @@ namespace MemoryUsageChecker
                         Megabytes = tailMb
                     };
                 }
+            }
+
+            // Image-fit verdict for the driver code-footprint category.
+            output.WriteBlank();
+            BudgetVerdict codeImageVerdict = output.WriteCategoryVerdict("Image-fit (total driver code resident)", totalDriverCodeBytes, output.Budget.TotalDriverCodeBudgetBytes);
+            if (jsonFootprint != null)
+            {
+                jsonFootprint.TotalDriverCodeBytes = totalDriverCodeBytes;
+                jsonFootprint.TotalDriverCodeBudgetBytes = output.Budget.TotalDriverCodeBudgetBytes;
+                jsonFootprint.TotalDriverCodeBudgetVerdict = codeImageVerdict.ToString().ToLowerInvariant();
             }
         }
     }

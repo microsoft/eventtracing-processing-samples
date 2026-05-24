@@ -36,13 +36,22 @@ namespace MemoryUsageChecker
     internal sealed class JsonReport
     {
         /// <summary>Schema version. Bumped only on breaking changes.</summary>
-        public string SchemaVersion { get; set; } = "1.0";
+        public string SchemaVersion { get; set; } = "1.1";
 
         /// <summary>Information about the tool that produced this report.</summary>
         public ToolInfo Tool { get; set; } = new ToolInfo();
 
         /// <summary>Information about the trace the report was produced from.</summary>
         public TraceInfo Trace { get; set; } = new TraceInfo();
+
+        /// <summary>
+        /// Active budget profile (<c>"8gb"</c> / <c>"4gb"</c> / <c>"custom"</c>)
+        /// and per-category numeric budgets so a consumer can re-compute
+        /// PASS/FAIL without re-deriving the tier defaults. Always
+        /// non-null — set at run start from the resolved command-line
+        /// arguments.
+        /// </summary>
+        public BudgetInfo Budget { get; set; } = new BudgetInfo();
 
         /// <summary>Information about symbol resolution for this run.</summary>
         public SymbolsInfo Symbols { get; set; } = new SymbolsInfo();
@@ -64,6 +73,46 @@ namespace MemoryUsageChecker
         public Exercise3Section Exercise3Pool { get; set; }
 
         // ---- Top-level info blocks --------------------------------------
+
+        /// <summary>
+        /// Budget tier and per-category numeric budgets (in bytes) that
+        /// drove the PASS/WARN/FAIL verdicts in this run.
+        /// </summary>
+        public sealed class BudgetInfo
+        {
+            /// <summary>Friendly tier name (<c>"8gb"</c>, <c>"4gb"</c>, or <c>"custom"</c>).</summary>
+            public string Profile { get; set; } = "8gb";
+
+            /// <summary>Top-N user-mode process rows shown in each ranked table.</summary>
+            public int TopProcesses { get; set; } = 15;
+
+            /// <summary>Top-N driver rows shown in each ranked table.</summary>
+            public int TopDrivers { get; set; } = 10;
+
+            /// <summary>Per-process Active working-set ceiling (Exercise 1), in bytes.</summary>
+            public long PerProcessWorkingSetBudgetBytes { get; set; }
+
+            /// <summary>Per-process VirtualAlloc Impacting ceiling (Exercise 2), in bytes.</summary>
+            public long PerProcessVirtualAllocBudgetBytes { get; set; }
+
+            /// <summary>Per-driver NonPaged-pool Impacting ceiling (Exercise 3A), in bytes.</summary>
+            public long PerDriverPoolBudgetBytes { get; set; }
+
+            /// <summary>Per-driver code-resident footprint ceiling (Exercise 3B), in bytes.</summary>
+            public long PerDriverCodeBudgetBytes { get; set; }
+
+            /// <summary>Whole-image user-mode WS ceiling (Exercise 1 PASS/FAIL), in bytes.</summary>
+            public long TotalUserWorkingSetBudgetBytes { get; set; }
+
+            /// <summary>Whole-image driver NP-pool ceiling (Exercise 3A PASS/FAIL), in bytes.</summary>
+            public long TotalDriverPoolBudgetBytes { get; set; }
+
+            /// <summary>Whole-image driver code-footprint ceiling (Exercise 3B PASS/FAIL), in bytes.</summary>
+            public long TotalDriverCodeBudgetBytes { get; set; }
+
+            /// <summary>Display floor below which a row is hidden, in bytes.</summary>
+            public long MinDisplayBytes { get; set; }
+        }
 
         /// <summary>Producer-tool identity (assembly version + runtime + host OS).</summary>
         public sealed class ToolInfo
@@ -219,6 +268,12 @@ namespace MemoryUsageChecker
             public List<RankedDriverLocked> TopDriverLockedNonPaged { get; set; } = new List<RankedDriverLocked>();
             /// <summary>Tail summary line, when the full list was truncated.</summary>
             public TailSummary TailDriverLockedNonPaged { get; set; }
+            /// <summary>Sum of every named-process Active WS in bytes (Top-N + tail), used for the image-fit PASS/FAIL verdict.</summary>
+            public long? TotalUserModeActiveBytes { get; set; }
+            /// <summary>Whole-image user-mode WS budget (bytes) for the active tier.</summary>
+            public long? TotalUserModeBudgetBytes { get; set; }
+            /// <summary>Image-fit verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c>) for total user-mode WS.</summary>
+            public string TotalUserModeBudgetVerdict { get; set; }
         }
 
         public sealed class MmListBucket
@@ -241,6 +296,8 @@ namespace MemoryUsageChecker
             public long TotalBytes { get; set; }
             public double TotalMegabytes { get; set; }
             public List<CategoryMb> ByCategoryMegabytes { get; set; } = new List<CategoryMb>();
+            /// <summary>Per-item budget verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c> / <c>"notapplicable"</c>).</summary>
+            public string BudgetVerdict { get; set; }
         }
 
         public sealed class CategoryMb
@@ -282,6 +339,8 @@ namespace MemoryUsageChecker
             public long ImpactingBytes { get; set; }
             public long TransientBytes { get; set; }
             public long TotalBytes { get; set; }
+            /// <summary>Per-item budget verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c> / <c>"notapplicable"</c>).</summary>
+            public string BudgetVerdict { get; set; }
             public List<RankedStack> TopImpactingStacks { get; set; } = new List<RankedStack>();
             public List<RankedStack> TopTransientStacks { get; set; } = new List<RankedStack>();
         }
@@ -320,6 +379,12 @@ namespace MemoryUsageChecker
             public List<RankedTag> TopDriverTagBreakdown { get; set; } = new List<RankedTag>();
             /// <summary>Tail summary for the #1-driver tag breakdown, when truncated.</summary>
             public TailSummary TailTagBreakdown { get; set; }
+            /// <summary>Sum of NonPaged Impacting bytes across every driver (Top-N + tail).</summary>
+            public long? TotalNonPagedImpactingBytes { get; set; }
+            /// <summary>Whole-image NP-pool budget (bytes) for the active tier.</summary>
+            public long? TotalNonPagedBudgetBytes { get; set; }
+            /// <summary>Image-fit verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c>) for total driver NP-pool.</summary>
+            public string TotalNonPagedBudgetVerdict { get; set; }
         }
 
         public sealed class RankedDriverPool
@@ -331,6 +396,8 @@ namespace MemoryUsageChecker
             public long PagedImpactingBytes { get; set; }
             public long PagedTransientBytes { get; set; }
             public long AllocationCount { get; set; }
+            /// <summary>Per-item budget verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c> / <c>"notapplicable"</c>).</summary>
+            public string BudgetVerdict { get; set; }
             public List<RankedStack> TopImpactingStacks { get; set; } = new List<RankedStack>();
             public List<RankedStack> TopTransientStacks { get; set; } = new List<RankedStack>();
         }
@@ -349,6 +416,12 @@ namespace MemoryUsageChecker
             public DateTime? SnapshotTimestampUtc { get; set; }
             public List<RankedDriverFootprint> TopDriversByResidentBytes { get; set; } = new List<RankedDriverFootprint>();
             public TailSummary TailDrivers { get; set; }
+            /// <summary>Sum of resident driver code bytes across every driver (Top-N + tail).</summary>
+            public long? TotalDriverCodeBytes { get; set; }
+            /// <summary>Whole-image driver code-footprint budget (bytes) for the active tier.</summary>
+            public long? TotalDriverCodeBudgetBytes { get; set; }
+            /// <summary>Image-fit verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c>) for total driver code footprint.</summary>
+            public string TotalDriverCodeBudgetVerdict { get; set; }
         }
 
         public sealed class RankedDriverFootprint
@@ -356,6 +429,8 @@ namespace MemoryUsageChecker
             public int Rank { get; set; }
             public DriverIdentity Driver { get; set; }
             public long ResidentBytes { get; set; }
+            /// <summary>Per-item budget verdict (<c>"pass"</c> / <c>"warn"</c> / <c>"fail"</c> / <c>"notapplicable"</c>).</summary>
+            public string BudgetVerdict { get; set; }
         }
 
         // ---- Shared tail summary ---------------------------------------

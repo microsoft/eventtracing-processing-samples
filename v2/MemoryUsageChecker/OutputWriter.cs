@@ -13,7 +13,9 @@ namespace MemoryUsageChecker
     /// pasted directly into a bug report.
     /// </summary>
     /// <remarks>
-    /// Severity convention used by the analyzers (Exercises 1-3):
+    /// <para>
+    /// <b>Severity convention</b> used by the analyzers (Exercises 1-3):
+    /// </para>
     /// <list type="bullet">
     ///   <item><c>WriteHeader</c>           — Yellow.    Top-level section banners.</item>
     ///   <item><c>WriteSubHeader</c>        — Cyan.      Sub-sections and per-group titles.</item>
@@ -26,11 +28,26 @@ namespace MemoryUsageChecker
     ///   <item><c>WriteInfo</c>             — White.     Neutral info (symbol source, etc.).</item>
     /// </list>
     /// <para>
-    /// Size-ranked findings use the <c>WriteCritical</c> / <c>WriteHigh</c> /
+    /// <b>Size-ranked findings</b> use the <c>WriteCritical</c> / <c>WriteHigh</c> /
     /// <c>WriteNormal</c> / <c>WriteTail</c> family, or — more commonly — the
     /// convenience <see cref="WriteRanked"/> helper which selects the right
     /// color automatically based on rank.
     /// </para>
+    /// <para>
+    /// <b>Improvement-direction coloring</b> (added for budget-aware analysis):
+    /// when a row can be evaluated against a per-item budget, prefer
+    /// <see cref="WriteRowAgainstBudget"/> which paints the row by
+    /// <see cref="BudgetVerdict"/> instead of rank tier. The goal is that an
+    /// OEM tester can scan the report and answer "what do I have to shrink
+    /// to ship this image in N GB?" without reading numbers:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><c>WriteOverBudget</c>  — Red    + <c>"✗ "</c>. Row exceeds its budget; must be cut to fit the tier.</item>
+    ///   <item><c>WriteNearBudget</c>  — Yellow + <c>"! "</c>. Row is in 80–100 % of its budget; watch / reduce if possible.</item>
+    ///   <item><c>WriteUnderBudget</c> — Green  + <c>"✓ "</c>. Row is healthy — well under its budget.</item>
+    ///   <item><c>WriteVerdictPass</c> — Green  + <c>"✓ PASS"</c>. Category total fits the tier.</item>
+    ///   <item><c>WriteVerdictFail</c> — Red    + <c>"✗ FAIL"</c>. Category total exceeds the tier; report names the gap.</item>
+    /// </list>
     /// </remarks>
     internal sealed class OutputWriter : IDisposable
     {
@@ -45,8 +62,21 @@ namespace MemoryUsageChecker
             _file = new StreamWriter(filePath);
         }
 
-        /// <summary>Maximum number of rows displayed per "Top N" table (default 30).</summary>
-        public int TopN { get; init; } = 30;
+        /// <summary>
+        /// Back-compat alias retained for callers that still emit a single
+        /// "Top N" header. New analyzers should prefer
+        /// <see cref="TopProcesses"/> or <see cref="TopDrivers"/> because
+        /// processes and drivers have very different "knee of the curve"
+        /// behavior in real OEM traces (processes flatten out around
+        /// rank-15, drivers around rank-10 — see <c>BudgetProfile</c>).
+        /// </summary>
+        public int TopN { get; init; } = 15;
+
+        /// <summary>Maximum number of user-mode process rows displayed in each ranked table (default 15).</summary>
+        public int TopProcesses { get; init; } = 15;
+
+        /// <summary>Maximum number of driver rows displayed in each ranked table (default 10).</summary>
+        public int TopDrivers { get; init; } = 10;
 
         /// <summary>Maximum number of rows displayed per "Top K" stack list (default 5).</summary>
         public int TopK { get; init; } = 5;
@@ -101,6 +131,14 @@ namespace MemoryUsageChecker
             ? $" (>= {MinDisplayBytes / 1048576.0:0.##} MB)"
             : string.Empty;
 
+        /// <summary>
+        /// Active budget tier (<c>8gb</c> / <c>4gb</c> / <c>custom</c>) used
+        /// to color rows and emit the PASS/FAIL verdicts in the executive
+        /// summary. Always non-null — callers default to
+        /// <see cref="BudgetProfile.EightGb"/> when no profile is selected.
+        /// </summary>
+        public BudgetProfile Budget { get; init; } = BudgetProfile.EightGb();
+
         /// <summary>Yellow. Section banner / exercise title.</summary>
         public void WriteHeader(string message)     => Write(message, ConsoleColor.Yellow);
         /// <summary>Cyan. Sub-section header inside an exercise.</summary>
@@ -135,6 +173,113 @@ namespace MemoryUsageChecker
         public void WriteNormal(string message)     => Write(message, ConsoleColor.White);
         /// <summary>DarkGray. The <c>"+ N more ... totaling X.XX MB"</c> summary line after a truncated list.</summary>
         public void WriteTail(string message)       => Write(message, ConsoleColor.DarkGray);
+
+        // -----------------------------------------------------------------
+        // Improvement-direction (budget-aware) coloring.
+        //
+        // The prefix glyph is kept short and ASCII-safe so the result file
+        // remains pasteable into bug reports / GitHub issues without the
+        // reader needing a Unicode-aware terminal: '✗' = over budget,
+        // '!' = near budget, '✓' = under budget. Console rendering uses
+        // the matching Red / Yellow / Green color so a quick visual scan
+        // surfaces "what do I need to shrink?".
+        // -----------------------------------------------------------------
+
+        /// <summary>Red. Row exceeds its per-item budget — must be cut for the image to fit the active tier. Prefixes "<c>✗ </c>".</summary>
+        public void WriteOverBudget(string message) => Write("✗ " + message, ConsoleColor.Red);
+
+        /// <summary>Yellow. Row is within 80–100 % of its per-item budget — watch, reduce if possible. Prefixes "<c>! </c>".</summary>
+        public void WriteNearBudget(string message) => Write("! " + message, ConsoleColor.Yellow);
+
+        /// <summary>Green. Row is well under its per-item budget — healthy. Prefixes "<c>✓ </c>".</summary>
+        public void WriteUnderBudget(string message) => Write("✓ " + message, ConsoleColor.Green);
+
+        /// <summary>Green. Aggregate "category total fits the tier budget" verdict line. Prefixes "<c>✓ PASS </c>".</summary>
+        public void WriteVerdictPass(string message) => Write("✓ PASS " + message, ConsoleColor.Green);
+
+        /// <summary>Yellow. Aggregate "category total is close to its budget" verdict line. Prefixes "<c>! WATCH </c>".</summary>
+        public void WriteVerdictWatch(string message) => Write("! WATCH " + message, ConsoleColor.Yellow);
+
+        /// <summary>Red. Aggregate "category total exceeds the tier budget" verdict line. Prefixes "<c>✗ FAIL </c>".</summary>
+        public void WriteVerdictFail(string message) => Write("✗ FAIL " + message, ConsoleColor.Red);
+
+        /// <summary>
+        /// Writes a size-ranked row, coloring it by per-item budget if one
+        /// is configured (<paramref name="budgetBytes"/> &gt; 0) and falling
+        /// back to <see cref="WriteRanked"/> otherwise. Budget verdict
+        /// always wins over rank-tier so the "what to shrink" signal is
+        /// never hidden by the "this is rank #1" signal. The
+        /// <c>"trim ≥ X MB"</c> suffix is appended on over-budget rows so
+        /// the OEM sees the exact gap inline.
+        /// </summary>
+        /// <param name="rank">1-based rank in the ranked list.</param>
+        /// <param name="total">Total number of rows actually displayed (after Top-N truncation).</param>
+        /// <param name="bytes">Authoritative size of this row, in bytes.</param>
+        /// <param name="budgetBytes">Per-item budget for this row, in bytes. Pass <c>0</c> to disable budget coloring.</param>
+        /// <param name="message">Pre-formatted row text (without the verdict glyph or trim suffix).</param>
+        /// <returns>The verdict that was applied (useful for callers that want to bump per-category counters).</returns>
+        public BudgetVerdict WriteRowAgainstBudget(int rank, int total, long bytes, long budgetBytes, string message)
+        {
+            BudgetVerdict verdict = BudgetProfile.Evaluate(bytes, budgetBytes);
+            switch (verdict)
+            {
+                case BudgetVerdict.Fail:
+                {
+                    double overMb = (bytes - budgetBytes) / 1048576.0;
+                    double budgetMb = budgetBytes / 1048576.0;
+                    WriteOverBudget($"{message}  → trim ≥ {overMb:F2} MB to fit {budgetMb:F0} MB / {Budget.Name} budget");
+                    return verdict;
+                }
+                case BudgetVerdict.Warn:
+                {
+                    double budgetMb = budgetBytes / 1048576.0;
+                    WriteNearBudget($"{message}  ({100.0 * bytes / budgetBytes:F0}% of {budgetMb:F0} MB / {Budget.Name} budget)");
+                    return verdict;
+                }
+                case BudgetVerdict.Pass:
+                    WriteUnderBudget(message);
+                    return verdict;
+                case BudgetVerdict.NotApplicable:
+                default:
+                    WriteRanked(rank, total, message);
+                    return verdict;
+            }
+        }
+
+        /// <summary>
+        /// Emits one PASS/WATCH/FAIL line for a per-category total. The
+        /// caller supplies a short category label (e.g. "<c>User-mode WS</c>")
+        /// and the actual / budget byte counts; the verdict and color are
+        /// derived from <see cref="BudgetProfile.Evaluate"/>. Returns the
+        /// verdict so the caller can roll it up into an overall image-fit
+        /// PASS/FAIL banner.
+        /// </summary>
+        public BudgetVerdict WriteCategoryVerdict(string label, long actualBytes, long budgetBytes)
+        {
+            double actualMb = actualBytes / 1048576.0;
+            double budgetMb = budgetBytes / 1048576.0;
+            BudgetVerdict verdict = BudgetProfile.Evaluate(actualBytes, budgetBytes);
+            string body = $"{label}: {actualMb,7:F1} MB used / {budgetMb,6:F0} MB budget ({Budget.Name} tier)";
+            switch (verdict)
+            {
+                case BudgetVerdict.Fail:
+                {
+                    double overMb = actualMb - budgetMb;
+                    WriteVerdictFail($"{body}  → cut ≥ {overMb:F1} MB to fit");
+                    break;
+                }
+                case BudgetVerdict.Warn:
+                    WriteVerdictWatch(body);
+                    break;
+                case BudgetVerdict.Pass:
+                    WriteVerdictPass(body);
+                    break;
+                default:
+                    WriteNormal($"   {body}  (no budget configured)");
+                    break;
+            }
+            return verdict;
+        }
 
         /// <summary>
         /// Writes <paramref name="message"/> with a color picked by rank so that

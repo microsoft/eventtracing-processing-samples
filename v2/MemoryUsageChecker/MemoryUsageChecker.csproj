@@ -31,6 +31,22 @@
 			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
 		</Content>
 		<!--
+		Ship the user-editable budget profiles file next to the .exe so
+		OEMs / ODMs can retune the 16 GB / 8 GB / 4 GB image-fit budgets
+		(and the warn / fail verdict percentages) by editing a single
+		text file - no command-line arguments required. The double-click
+		workflow then reads these values automatically. The same JSON is
+		regenerable at runtime via the write-default-profiles flag, but
+		shipping it ensures the released drop is immediately
+		self-documenting.
+		-->
+		<Content Include="Profiles\MemoryUsageChecker.profiles.json">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+		<!--
 		Ship the project README next to MemoryUsageChecker.exe so the released
 		binary drop (zip / loose folder) is self-documenting for external
 		testers and IHVs who never see the source repo. The README is the

@@ -47,6 +47,9 @@ namespace MemoryUsageChecker
                 if (line.StartsWith("--- ")) { output.WriteSubHeader(line); continue; }
                 if (line.StartsWith("  >> ")) { output.WriteCritical(line); continue; }
                 if (line.StartsWith("  RECOMMENDATION")) { output.WriteNotable(line); continue; }
+                if (line.StartsWith("  ✓ PASS")) { output.WriteVerdictPass(line); continue; }
+                if (line.StartsWith("  ! WATCH")) { output.WriteVerdictWatch(line); continue; }
+                if (line.StartsWith("  ✗ FAIL")) { output.WriteVerdictFail(line); continue; }
                 output.WriteNormal(line);
             }
 
@@ -88,6 +91,9 @@ namespace MemoryUsageChecker
             }
             lines.Add(string.Empty);
 
+            AddImageFitVerdict(lines, report);
+            lines.Add(string.Empty);
+
             AddExercise1(lines, report.Exercise1ResidentSet);
             lines.Add(string.Empty);
             AddExercise2(lines, report.Exercise2VirtualAllocHeap);
@@ -98,6 +104,49 @@ namespace MemoryUsageChecker
             lines.Add("(Full per-process/per-driver detail is in the main result file above this section.)");
 
             return lines;
+        }
+
+        private static void AddImageFitVerdict(List<string> lines, JsonReport report)
+        {
+            JsonReport.BudgetInfo budget = report?.Budget;
+            string profile = budget?.Profile ?? "8gb";
+            lines.Add($"--- Image-Fit Verdict ({profile} profile) ---");
+
+            // Pull the per-category totals/budgets that the exercises persisted.
+            JsonReport.Exercise1Snapshot snap1 = report?.Exercise1ResidentSet?.Snapshots
+                ?.FirstOrDefault(s => s.TotalUserModeBudgetVerdict != null);
+            JsonReport.Exercise3PoolAllocations pool = report?.Exercise3Pool?.PoolAllocations;
+            JsonReport.Exercise3DriverCodeFootprint code = report?.Exercise3Pool?.DriverCodeFootprint;
+
+            AddVerdictLine(lines, "Total user-mode Active WS",
+                snap1?.TotalUserModeActiveBytes, snap1?.TotalUserModeBudgetBytes,
+                snap1?.TotalUserModeBudgetVerdict);
+            AddVerdictLine(lines, "Total driver NonPaged pool",
+                pool?.TotalNonPagedImpactingBytes, pool?.TotalNonPagedBudgetBytes,
+                pool?.TotalNonPagedBudgetVerdict);
+            AddVerdictLine(lines, "Total driver code resident",
+                code?.TotalDriverCodeBytes, code?.TotalDriverCodeBudgetBytes,
+                code?.TotalDriverCodeBudgetVerdict);
+        }
+
+        private static void AddVerdictLine(List<string> lines, string label, long? actualBytes, long? budgetBytes, string verdict)
+        {
+            if (actualBytes == null || budgetBytes == null || budgetBytes.Value <= 0)
+            {
+                lines.Add($"  (skipped: {label} — data unavailable for this run)");
+                return;
+            }
+            double actualMb = actualBytes.Value / 1048576.0;
+            double budgetMb = budgetBytes.Value / 1048576.0;
+            double pct = 100.0 * actualBytes.Value / budgetBytes.Value;
+            string banner = (verdict ?? "pass").ToLowerInvariant() switch
+            {
+                "fail" => "  ✗ FAIL",
+                "warn" => "  ! WATCH",
+                _ => "  ✓ PASS",
+            };
+            string detail = $" : {label} = {actualMb:F1} MB of {budgetMb:F0} MB budget ({pct:F0}%)";
+            lines.Add(banner + detail);
         }
 
         private static void AddExercise1(List<string> lines, JsonReport.Exercise1Section section)
