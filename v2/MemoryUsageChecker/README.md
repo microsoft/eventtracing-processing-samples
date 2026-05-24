@@ -89,8 +89,18 @@ MemoryUsageChecker.exe <trace.etl> [--top N] [--symbols <path>] [--no-symbols]
 |---|---|---|
 | `<trace.etl>` | (required) | Path to the ETL file. |
 | `--top N` | `10` | Caps the number of top entries displayed per category. |
-| `--symbols <path>` | `Automatic` | Override the symbol search path. `Automatic` honors `_NT_SYMBOL_PATH` and falls back to the Microsoft public symbol server. |
+| `--symbols <path>` | (see below) | Override the symbol search path. Accepts any `symsrv`-compatible string, including `SRV*<cache>*<server>`. |
 | `--no-symbols` | (off) | Skip symbol resolution. Exercises 2 and 3 still run but stack frames show `[no symbols]`. |
+
+Symbol-path resolution precedence (when `--no-symbols` is not specified):
+
+1. `--symbols <path>` if provided on the command line.
+2. The `_NT_SYMBOL_PATH` environment variable if it is set and non-empty.
+3. Otherwise, the Microsoft Public Symbol Server is used by default:
+   `SRV*%LOCALAPPDATA%\SymbolCache*https://msdl.microsoft.com/download/symbols`
+   The downstream cache directory is created on first use so the next run is incremental.
+
+The active symbol source is printed at the top of every run, so you can confirm which path the sample resolved before stacks are decoded.
 
 A timestamped result file `MemoryUsage_Result_yyyyMMdd_HHmm.txt` is written next to the working directory and mirrors the console output (without colors), ready to attach to a bug.
 

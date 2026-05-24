@@ -95,9 +95,36 @@ namespace MemoryUsageChecker
 
                 if (!noSymbols && pendingSymbols.HasResult)
                 {
+                    ISymbolPath symbolPath;
+                    string symbolSource;
+                    if (symbolsOverride != null)
+                    {
+                        symbolPath = new SymbolPath(symbolsOverride);
+                        symbolSource = $"--symbols (explicit): {symbolsOverride}";
+                    }
+                    else
+                    {
+                        string envPath = Environment.GetEnvironmentVariable("_NT_SYMBOL_PATH");
+                        if (!string.IsNullOrWhiteSpace(envPath))
+                        {
+                            symbolPath = new SymbolPath(envPath);
+                            symbolSource = $"_NT_SYMBOL_PATH: {envPath}";
+                        }
+                        else
+                        {
+                            string cacheDir = Path.Combine(
+                                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                "SymbolCache");
+                            Directory.CreateDirectory(cacheDir);
+                            string defaultPath = $"SRV*{cacheDir}*https://msdl.microsoft.com/download/symbols";
+                            symbolPath = new SymbolPath(defaultPath);
+                            symbolSource = $"Microsoft Public Symbol Server (cache: {cacheDir})";
+                        }
+                    }
+
+                    output.WriteInfo($"Symbol path: {symbolSource}");
                     try
                     {
-                        ISymbolPath symbolPath = symbolsOverride == null ? SymbolPath.Automatic : new SymbolPath(symbolsOverride);
                         pendingSymbols.Result.LoadSymbolsForConsoleAsync(SymCachePath.Automatic, symbolPath).GetAwaiter().GetResult();
                     }
                     catch (Exception ex)
