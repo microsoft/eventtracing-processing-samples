@@ -119,7 +119,7 @@ goto StartOptionsMenu
 :StartNow
 echo.
 echo Starting Tracing Now... (%wprpFileName%!%profileName%)
-wpr.exe -start "%scriptDirectory%%wprpFileName%!%profileName%" -filemode -recordTempTo "%traceFilesOutputPath%\"
+wpr.exe -start "%scriptDirectory%%wprpFileName%!%profileName%" -filemode -recordTempTo "%traceFilesOutputPath%"
 if not %ERRORLEVEL%==0 goto End
 echo.
 echo ----------------------------------------------------------------------
@@ -136,7 +136,7 @@ goto CollectMoreInfo
 :ConfigureBootTrace
 echo.
 echo Configuring Boot Session Trace... (%wprpFileName%!%profileName%)
-wpr.exe -addboot "%scriptDirectory%%wprpFileName%!%profileName%" -filemode -recordTempTo "%traceFilesOutputPath%\"
+wpr.exe -addboot "%scriptDirectory%%wprpFileName%!%profileName%" -filemode -recordTempTo "%traceFilesOutputPath%"
 if not %ERRORLEVEL%==0 goto End
 
 rem Save the profile name to registry so we can retrieve it when stopping the boot trace.
