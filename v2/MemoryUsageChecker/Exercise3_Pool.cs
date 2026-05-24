@@ -14,6 +14,7 @@ namespace MemoryUsageChecker
     internal static class Exercise3_Pool
     {
         private const long NotableNonPagedBytes = 1L * 1024 * 1024; // 1 MB
+        private const long NotableDriverCodeBytes = 2L * 1024 * 1024; // 2 MB
         private const long PageSizeBytes = 4096;
         private const string KernelInternalBucket = "(kernel-internal)";
 
@@ -173,11 +174,74 @@ namespace MemoryUsageChecker
             return KernelInternalBucket;
         }
 
-        // ---- Part B: Driver code footprint (filled in Task 8) ----
+        // ---- Part B: Driver code footprint ----
         private static void RunDriverCodeFootprintPart(OutputWriter output, IPendingResult<IResidentSetDataSource> pendingResidentSet)
         {
             output.WriteSubHeader("--- Driver Code Footprint (File Backed Pages) ---");
-            output.WriteSkipped("[not yet implemented]");
+
+            if (!pendingResidentSet.HasResult || pendingResidentSet.Result.Snapshots.Count == 0)
+            {
+                output.WriteSkipped("[skipped - resident-set data not present in trace]");
+                return;
+            }
+
+            // Pick latest snapshot for steady-state image footprint
+            var snapshot = pendingResidentSet.Result.Snapshots.OrderByDescending(s => s.Timestamp.Nanoseconds).First();
+
+            // Filter pages that represent driver code resident in RAM
+            var driverPages = snapshot.Pages.Where(p =>
+                p.MemoryManagerListType == MemoryManagerListType.Active &&
+                !string.IsNullOrEmpty(p.Path) &&
+                p.Path.IndexOf(@"\System32\drivers\", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                (p.Category == ResidentSetPageCategory.Driver ||
+                 p.Category == ResidentSetPageCategory.DriverFile ||
+                 p.Category == ResidentSetPageCategory.Image));
+
+            // Group by full path (preserving casing for distinct identifiers)
+            var allByDriver = driverPages
+                .GroupBy(p => p.Path)
+                .Select(g => new
+                {
+                    Path = g.Key,
+                    Leaf = System.IO.Path.GetFileName(g.Key),
+                    PageCount = g.LongCount(),
+                    Bytes = g.LongCount() * PageSizeBytes,
+                    Mb = (g.LongCount() * PageSizeBytes) / 1024.0 / 1024.0
+                })
+                .OrderByDescending(x => x.Mb)
+                .ToList();
+
+            var displayed = allByDriver.Take(output.TopN).ToList();
+
+            if (displayed.Count == 0)
+            {
+                output.WriteFinding("(no driver code pages found in the resident set)");
+                return;
+            }
+
+            output.WriteSubHeader($"Top {output.TopN} drivers by code resident footprint (MB):");
+            int rank = 0;
+            foreach (var row in displayed)
+            {
+                rank++;
+                string line = $"  {row.Mb,8:F2} MB  {row.PageCount,7} pages  {row.Leaf,-28}  {row.Path}";
+                if (row.Bytes >= NotableDriverCodeBytes)
+                {
+                    output.WriteCritical(line);
+                }
+                else
+                {
+                    output.WriteRanked(rank, displayed.Count, line);
+                }
+            }
+
+            // Tail summary
+            if (allByDriver.Count > displayed.Count)
+            {
+                int tailCount = allByDriver.Count - displayed.Count;
+                double tailMb = allByDriver.Skip(displayed.Count).Sum(x => x.Mb);
+                output.WriteTail($"  + {tailCount} more drivers totaling {tailMb:F2} MB");
+            }
         }
     }
 }
