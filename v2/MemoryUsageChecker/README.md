@@ -100,11 +100,25 @@ When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by
 
 Symbol-path resolution precedence (when `--no-symbols` is not specified):
 
-1. `--symbols <path>` if provided on the command line.
-2. The `_NT_SYMBOL_PATH` environment variable if it is set and non-empty.
+1. `--symbols <path>` if provided on the command line. Used as-is — the tool assumes you know exactly what you want.
+2. The `_NT_SYMBOL_PATH` environment variable if it is set and non-empty. If the path doesn't already declare a downstream cache (no `cache*<dir>` element and no `srv*<localpath>*<url>` form), the tool **auto-prepends `cache*%LOCALAPPDATA%\SymbolCache;`** so downloaded PDBs persist across runs. The augmented path is logged.
 3. Otherwise, the Microsoft Public Symbol Server is used by default:
    `SRV*%LOCALAPPDATA%\SymbolCache*https://msdl.microsoft.com/download/symbols`
    The downstream cache directory is created on first use so the next run is incremental.
+
+The pre-processed TraceProcessing `.symcache` files go to:
+
+1. `_NT_SYMCACHE_PATH` if set.
+2. Otherwise `C:\SymCache` (the convention shared with WPA / PerfView / xperf) when the current session can write there (admin sessions).
+3. Otherwise `%LOCALAPPDATA%\MemoryUsageChecker\SymCache` (per-user fallback for non-admin sessions). The legacy `SymCachePath.Automatic` default of `C:\SymCache` silently degrades for non-admin sessions, which is why the tool probes for write access and falls back explicitly.
+
+Both cache locations are printed at startup along with their current size, e.g.
+```
+Symbol path: Microsoft Public Symbol Server (cache: C:\Users\you\AppData\Local\SymbolCache)
+SymCache dir (default (shared with WPA/PerfView)): C:\SymCache
+  Cache pre-populated: 5,170 symcache files (8.46 GiB), 2,330 PDB files (3.21 GiB). Matched symbols will be reused (no re-download).
+```
+so you can confirm cache hits between runs. To wipe the caches, delete the directories above.
 
 The active symbol source is printed at the top of every run, so you can confirm which path the sample resolved before stacks are decoded.
 

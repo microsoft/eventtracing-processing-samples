@@ -349,9 +349,40 @@ namespace MemoryUsageChecker
         }
 
         /// <summary>
+        /// Default per-user PDB download cache. Used by the symsrv layer
+        /// as a downstream store for any <c>srv*</c> elements that don't
+        /// already carry one. Persistent across runs so re-analysis of
+        /// the same trace skips the network download. Kept at the legacy
+        /// <c>%LOCALAPPDATA%\SymbolCache</c> path so users who already have
+        /// a populated cache don't lose it.
+        /// </summary>
+        private static readonly string DefaultPdbCacheDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SymbolCache");
+
+        /// <summary>
+        /// Per-user fallback TraceProcessing <c>.symcache</c> directory used
+        /// only when the conventional <c>C:\SymCache</c> location is not
+        /// writable (non-admin sessions). The convention is to share
+        /// <c>C:\SymCache</c> with WPA / PerfView so caches are reused
+        /// cross-tool; this fallback exists so non-admin sessions still get
+        /// a persistent symcache across runs instead of silently dropping
+        /// the data into a temp folder.
+        /// </summary>
+        private static readonly string FallbackSymCacheDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MemoryUsageChecker", "SymCache");
+
+        /// <summary>
         /// Resolves the symbol path with the documented precedence
         /// (<c>--symbols</c> &gt; <c>_NT_SYMBOL_PATH</c> &gt; Microsoft Public
         /// Symbol Server with a per-user cache) and triggers symbol loading.
+        /// When <c>_NT_SYMBOL_PATH</c> is set without a downstream
+        /// <c>cache*</c> directive, one is prepended so downloaded PDBs
+        /// persist across runs. The TraceProcessing <c>.symcache</c> path is
+        /// taken from <c>_NT_SYMCACHE_PATH</c> when set, otherwise it prefers
+        /// the conventional <c>C:\SymCache</c> (shared with WPA) and falls
+        /// back to a per-user directory when that path is not writable.
         /// Failures are logged and surfaced via <see cref="OutputWriter.WriteNotable"/>
         /// but never abort the analysis: stacks just show <c>[no symbols]</c>.
         /// </summary>
@@ -381,8 +412,37 @@ namespace MemoryUsageChecker
                 return;
             }
 
+            string symCacheDir;
+            string symCacheSource;
+            string envSymCache = Environment.GetEnvironmentVariable("_NT_SYMCACHE_PATH");
+            if (!string.IsNullOrWhiteSpace(envSymCache))
+            {
+                symCacheDir = envSymCache.Trim();
+                symCacheSource = "_NT_SYMCACHE_PATH";
+            }
+            else if (TryEnsureWritableDirectory(@"C:\SymCache"))
+            {
+                symCacheDir = @"C:\SymCache";
+                symCacheSource = "default (shared with WPA/PerfView)";
+            }
+            else
+            {
+                symCacheDir = FallbackSymCacheDir;
+                symCacheSource = "per-user fallback (C:\\SymCache not writable; needs admin)";
+            }
+            try { Directory.CreateDirectory(symCacheDir); }
+            catch (Exception ex)
+            {
+                Log.Warn($"Could not create SymCache directory '{symCacheDir}': {ex.Message}. Falling back to per-user path.");
+                symCacheDir = FallbackSymCacheDir;
+                symCacheSource = "per-user fallback (initial path failed)";
+                Directory.CreateDirectory(symCacheDir);
+            }
+            ISymCachePath symCachePath = new RawSymCachePath(symCacheDir);
+
             ISymbolPath symbolPath;
             string symbolSource;
+            string downstreamPdbCacheForStats = null;
             if (symbolsOverride != null)
             {
                 symbolPath = new SymbolPath(symbolsOverride);
@@ -393,23 +453,41 @@ namespace MemoryUsageChecker
                 string envPath = Environment.GetEnvironmentVariable("_NT_SYMBOL_PATH");
                 if (!string.IsNullOrWhiteSpace(envPath))
                 {
-                    symbolPath = new SymbolPath(envPath);
-                    symbolSource = $"_NT_SYMBOL_PATH: {envPath}";
+                    Directory.CreateDirectory(DefaultPdbCacheDir);
+                    string effective = EnsureDownstreamCache(envPath, DefaultPdbCacheDir, out bool augmented);
+                    symbolPath = new SymbolPath(effective);
+                    symbolSource = augmented
+                        ? $"_NT_SYMBOL_PATH (auto-prepended 'cache*{DefaultPdbCacheDir};' so downloads persist): {effective}"
+                        : $"_NT_SYMBOL_PATH: {envPath}";
+                    downstreamPdbCacheForStats = augmented ? DefaultPdbCacheDir : ExtractFirstDownstreamCache(envPath);
                 }
                 else
                 {
-                    string cacheDir = Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                        "SymbolCache");
-                    Directory.CreateDirectory(cacheDir);
-                    string defaultPath = $"SRV*{cacheDir}*https://msdl.microsoft.com/download/symbols";
+                    Directory.CreateDirectory(DefaultPdbCacheDir);
+                    string defaultPath = $"SRV*{DefaultPdbCacheDir}*https://msdl.microsoft.com/download/symbols";
                     symbolPath = new SymbolPath(defaultPath);
-                    symbolSource = $"Microsoft Public Symbol Server (cache: {cacheDir})";
+                    symbolSource = $"Microsoft Public Symbol Server (cache: {DefaultPdbCacheDir})";
+                    downstreamPdbCacheForStats = DefaultPdbCacheDir;
                 }
             }
 
             output.WriteInfo($"Symbol path: {symbolSource}");
+            output.WriteInfo($"SymCache dir ({symCacheSource}): {symCacheDir}");
+            (long files, long bytes) symCacheStats = QuickCacheStats(symCacheDir);
+            (long files, long bytes) pdbCacheStats = QuickCacheStats(downstreamPdbCacheForStats);
+            if (symCacheStats.files > 0 || pdbCacheStats.files > 0)
+            {
+                string pdbPart = downstreamPdbCacheForStats != null
+                    ? $", {pdbCacheStats.files:N0} PDB files ({FormatMiB(pdbCacheStats.bytes)})"
+                    : "";
+                output.WriteInfo($"  Cache pre-populated: {symCacheStats.files:N0} symcache files ({FormatMiB(symCacheStats.bytes)}){pdbPart}. Matched symbols will be reused (no re-download).");
+            }
+            else
+            {
+                output.WriteInfo("  Caches empty: first-run download expected. Subsequent runs will reuse what's downloaded here.");
+            }
             Log.Info($"Symbol source resolved to: {symbolSource}");
+            Log.Info($"SymCache resolved to: {symCacheDir} (source: {symCacheSource})");
             if (jsonReport != null)
             {
                 jsonReport.Symbols.Source = symbolSource;
@@ -430,7 +508,7 @@ namespace MemoryUsageChecker
                     try
                     {
                         Console.SetOut(interceptor);
-                        pendingSymbols.Result.LoadSymbolsForConsoleAsync(SymCachePath.Automatic, symbolPath).GetAwaiter().GetResult();
+                        pendingSymbols.Result.LoadSymbolsForConsoleAsync(symCachePath, symbolPath).GetAwaiter().GetResult();
                         if (jsonReport != null) jsonReport.Symbols.Loaded = true;
                     }
                     finally
@@ -446,6 +524,131 @@ namespace MemoryUsageChecker
                     if (jsonReport != null) jsonReport.Symbols.Loaded = false;
                 }
             }
+        }
+
+        /// <summary>
+        /// Returns <paramref name="path"/> unchanged if it already declares a
+        /// downstream cache (either a <c>cache*</c> element or an
+        /// <c>srv*&lt;localpath&gt;*&lt;url&gt;</c> element). Otherwise
+        /// prepends <c>cache*&lt;defaultCacheDir&gt;;</c> so any
+        /// <c>srv*</c> downloads get written to a persistent local store and
+        /// reused on subsequent runs.
+        /// </summary>
+        private static string EnsureDownstreamCache(string path, string defaultCacheDir, out bool augmented)
+        {
+            if (HasDownstreamCache(path))
+            {
+                augmented = false;
+                return path;
+            }
+            augmented = true;
+            return $"cache*{defaultCacheDir};{path}";
+        }
+
+        private static bool HasDownstreamCache(string path)
+        {
+            return ExtractFirstDownstreamCache(path) != null;
+        }
+
+        /// <summary>
+        /// Returns the first downstream cache directory declared in a
+        /// symsrv-format path string, or <c>null</c> when no cache is
+        /// declared. Used both to detect cache presence in
+        /// <see cref="HasDownstreamCache"/> and to surface the actual cache
+        /// directory in the startup "cache pre-populated" log line so the
+        /// user can see what's being reused.
+        /// </summary>
+        private static string ExtractFirstDownstreamCache(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            foreach (string raw in path.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string element = raw.Trim();
+                if (element.Length == 0) continue;
+                if (element.StartsWith("cache*", StringComparison.OrdinalIgnoreCase))
+                {
+                    string after = element.Substring("cache*".Length);
+                    int star = after.IndexOf('*');
+                    return star >= 0 ? after.Substring(0, star) : after;
+                }
+                if (element.StartsWith("srv*", StringComparison.OrdinalIgnoreCase))
+                {
+                    string[] parts = element.Split('*');
+                    if (parts.Length >= 3 && !LooksLikeUrl(parts[1]))
+                    {
+                        return parts[1];
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static bool LooksLikeUrl(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            return s.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || s.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                || s.StartsWith("file://", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Tests whether <paramref name="dir"/> can be created and written
+        /// to by the current process. Used to decide whether to use the
+        /// conventional <c>C:\SymCache</c> location (admin sessions, shared
+        /// with WPA) or fall back to a per-user directory (non-admin).
+        /// </summary>
+        private static bool TryEnsureWritableDirectory(string dir)
+        {
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string probe = Path.Combine(dir, $".muc_write_probe_{Guid.NewGuid():N}.tmp");
+                File.WriteAllText(probe, "probe");
+                File.Delete(probe);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Best-effort file count + byte total for a cache directory. Returns
+        /// (0, 0) when the directory is missing or <paramref name="dir"/> is
+        /// null; (-1, -1) on enumeration failure. Capped at 200 000 files /
+        /// 60 s wall to keep startup fast even against pathologically large
+        /// caches.
+        /// </summary>
+        private static (long files, long bytes) QuickCacheStats(string dir)
+        {
+            if (string.IsNullOrWhiteSpace(dir)) return (0, 0);
+            try
+            {
+                if (!Directory.Exists(dir)) return (0, 0);
+                long files = 0;
+                long bytes = 0;
+                Stopwatch sw = Stopwatch.StartNew();
+                foreach (string f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    try { bytes += new FileInfo(f).Length; } catch { /* deleted mid-scan */ }
+                    files++;
+                    if (files >= 200_000 || sw.Elapsed.TotalSeconds > 60) break;
+                }
+                return (files, bytes);
+            }
+            catch
+            {
+                return (-1, -1);
+            }
+        }
+
+        private static string FormatMiB(long bytes)
+        {
+            if (bytes < 0) return "?";
+            double mib = bytes / 1024.0 / 1024.0;
+            if (mib >= 1024.0) return $"{mib / 1024.0:F2} GiB";
+            return $"{mib:F2} MiB";
         }
 
         /// <summary>
@@ -541,10 +744,22 @@ namespace MemoryUsageChecker
             Console.Error.WriteLine("                      Top-K bucket / stack rows (default 2; pass 0 to disable");
             Console.Error.WriteLine("                      filtering and show every row).");
             Console.Error.WriteLine("  --symbols <path>    Override the symbol search path passed to the EventTracing SDK.");
+            Console.Error.WriteLine("                      Used as-is; assumed to already declare a downstream cache.");
             Console.Error.WriteLine("  --no-symbols        Skip symbol load entirely. Per-row stack drill-downs in");
             Console.Error.WriteLine("                      Exercises 2 and 3 are also suppressed because raw addresses");
             Console.Error.WriteLine("                      are not actionable; outer Top-N tables and the executive");
             Console.Error.WriteLine("                      summary are still produced.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Symbol caching (so repeat runs don't re-download):");
+            Console.Error.WriteLine("  PDB cache (default): %LOCALAPPDATA%\\SymbolCache");
+            Console.Error.WriteLine("    Used when neither --symbols nor _NT_SYMBOL_PATH is set. When _NT_SYMBOL_PATH");
+            Console.Error.WriteLine("    is set without a 'cache*<dir>' (or 'srv*<localpath>*<url>') element, this");
+            Console.Error.WriteLine("    path is auto-prepended as a cache* directive so downloads persist.");
+            Console.Error.WriteLine("  SymCache (default):  C:\\SymCache (shared with WPA), or %LOCALAPPDATA%\\");
+            Console.Error.WriteLine("    MemoryUsageChecker\\SymCache as a per-user fallback when C:\\SymCache is not");
+            Console.Error.WriteLine("    writable (non-admin). Override with _NT_SYMCACHE_PATH.");
+            Console.Error.WriteLine("  Both paths and their pre-existing sizes are printed at startup so you can");
+            Console.Error.WriteLine("  see cache hits.");
         }
 
         /// <summary>
