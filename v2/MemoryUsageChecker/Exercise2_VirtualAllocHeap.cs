@@ -136,8 +136,8 @@ namespace MemoryUsageChecker
                         ImpactingBytes = row.Impacting,
                         TransientBytes = row.Transient,
                         TotalBytes = row.Total,
-                        TopImpactingStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK),
-                        TopTransientStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK)
+                        TopImpactingStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK, output.MinDisplayBytes),
+                        TopTransientStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK, output.MinDisplayBytes)
                     });
                 }
             }
@@ -249,7 +249,7 @@ namespace MemoryUsageChecker
                         OutstandingBytes = row.OutstandingBytes,
                         LargestHeapHandle = largestHeap != null ? $"0x{largestHeap.Handle:X}" : null,
                         TopAllocationStacks = largestHeap != null
-                            ? BuildRankedStacksFromThreadStacks(largestHeap.Allocs.Select(a => (a.Stack, a.Size.Bytes)), output.TopK)
+                            ? BuildRankedStacksFromThreadStacks(largestHeap.Allocs.Select(a => (a.Stack, a.Size.Bytes)), output.TopK, output.MinDisplayBytes)
                             : new List<JsonReport.RankedStack>()
                     });
                 }
@@ -314,7 +314,7 @@ namespace MemoryUsageChecker
                 return;
             }
 
-            var topGroups = allGroups.Take(output.TopK).ToList();
+            var topGroups = allGroups.Where(x => x.TotalBytes >= output.MinDisplayBytes).Take(output.TopK).ToList();
             output.WriteData($"    {label}:");
             int idx = 0;
             foreach (var grp in topGroups)
@@ -356,7 +356,7 @@ namespace MemoryUsageChecker
                 return;
             }
 
-            var topGroups = allGroups.Take(output.TopK).ToList();
+            var topGroups = allGroups.Where(x => x.TotalBytes >= output.MinDisplayBytes).Take(output.TopK).ToList();
             output.WriteData($"    {label}:");
             int idx = 0;
             foreach (var grp in topGroups)
@@ -415,7 +415,7 @@ namespace MemoryUsageChecker
         /// byte totals and the sample stack's first 12 frames. Returns an
         /// empty list when no stacks are available.
         /// </summary>
-        internal static List<JsonReport.RankedStack> BuildRankedStacks(IEnumerable<(IStackSnapshot Stack, long SizeBytes)> sized, int topK)
+        internal static List<JsonReport.RankedStack> BuildRankedStacks(IEnumerable<(IStackSnapshot Stack, long SizeBytes)> sized, int topK, long minDisplayBytes)
         {
             var sizedList = sized.Where(x => x.Stack != null).ToList();
             var allGroups = sizedList
@@ -426,7 +426,7 @@ namespace MemoryUsageChecker
 
             var result = new List<JsonReport.RankedStack>();
             int rank = 0;
-            foreach (var grp in allGroups.Take(topK))
+            foreach (var grp in allGroups.Where(g => g.TotalBytes >= minDisplayBytes).Take(topK))
             {
                 rank++;
                 result.Add(new JsonReport.RankedStack
@@ -441,11 +441,11 @@ namespace MemoryUsageChecker
         }
 
         /// <summary>
-        /// Sibling of <see cref="BuildRankedStacks(IEnumerable{ValueTuple{IStackSnapshot, long}}, int)"/>
+        /// Sibling of <see cref="BuildRankedStacks(IEnumerable{ValueTuple{IStackSnapshot, long}}, int, long)"/>
         /// for the heap path, which provides <see cref="IThreadStack"/>s
         /// instead of <see cref="IStackSnapshot"/>s.
         /// </summary>
-        internal static List<JsonReport.RankedStack> BuildRankedStacksFromThreadStacks(IEnumerable<(IThreadStack Stack, long SizeBytes)> sized, int topK)
+        internal static List<JsonReport.RankedStack> BuildRankedStacksFromThreadStacks(IEnumerable<(IThreadStack Stack, long SizeBytes)> sized, int topK, long minDisplayBytes)
         {
             var sizedList = sized.Where(x => x.Stack != null).ToList();
             var allGroups = sizedList
@@ -456,7 +456,7 @@ namespace MemoryUsageChecker
 
             var result = new List<JsonReport.RankedStack>();
             int rank = 0;
-            foreach (var grp in allGroups.Take(topK))
+            foreach (var grp in allGroups.Where(g => g.TotalBytes >= minDisplayBytes).Take(topK))
             {
                 rank++;
                 result.Add(new JsonReport.RankedStack

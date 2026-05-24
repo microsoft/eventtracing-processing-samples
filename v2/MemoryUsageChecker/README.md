@@ -84,7 +84,7 @@ Capture with **Logging mode = File** and save the resulting `.etl` to disk.
 ## 2. Running the sample
 
 ```
-MemoryUsageChecker.exe [<trace.etl>] [--top N] [--symbols <path>] [--no-symbols]
+MemoryUsageChecker.exe [<trace.etl>] [--top N] [--min-display-mb V] [--symbols <path>] [--no-symbols]
 ```
 
 When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by **double-clicking** it in Explorer), the tool auto-selects the most recently modified `*.etl` file located in the **same folder as the .exe**, preferring `MemoryUsage-Trace.etl` (the canonical name produced by `MemoryUsageTrace.cmd`). The selected path is printed in cyan before processing starts. This makes the canonical one-folder workflow — collect with `MemoryUsageTrace.cmd`, analyze by double-clicking `MemoryUsageChecker.exe` — work without ever opening a shell.
@@ -93,6 +93,7 @@ When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by
 |---|---|---|
 | `<trace.etl>` | auto-discovered next to the .exe | Path to the ETL file. Omit to use the most recent `*.etl` sitting next to `MemoryUsageChecker.exe`. |
 | `--top N` | `10` | Caps the number of top entries displayed per category. |
+| `--min-display-mb V` | `2` | Hides inner Top-K bucket / stack rows below **V MiB** in **both** the text report and the JSON sidecar (e.g. the tiny `KernelStack`, `UserStack`, `WorkingSetMetadata` slivers under a process, and sub-2 MB commit-stack rows). The outer Top-N tables are unaffected. Pass `0` to disable filtering and emit every row. The "+ N more …" tail summary lines always account for the full tail so nothing is lost — only the noisy rows are trimmed from the displayed Top K. |
 | `--symbols <path>` | (see below) | Override the symbol search path. Accepts any `symsrv`-compatible string, including `SRV*<cache>*<server>`. |
 | `--no-symbols` | (off) | Skip symbol resolution. Exercises 2 and 3 still run but stack frames show `[no symbols]`. |
 

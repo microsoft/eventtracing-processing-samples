@@ -36,6 +36,7 @@ namespace MemoryUsageChecker
         {
             string tracePath = null;
             int topN = 10;
+            double minDisplayMb = 2.0;
             string symbolsOverride = null;
             bool noSymbols = false;
 
@@ -48,6 +49,17 @@ namespace MemoryUsageChecker
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
                         Console.Error.WriteLine("--top requires a positive integer.");
+                        Console.ResetColor();
+                        WaitForKeyIfInteractive();
+                        return 1;
+                    }
+                }
+                else if (a == "--min-display-mb" && i + 1 < args.Length)
+                {
+                    if (!double.TryParse(args[++i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out minDisplayMb) || minDisplayMb < 0)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.Error.WriteLine("--min-display-mb requires a non-negative number (e.g. 2, 0.5, or 0 to disable filtering).");
                         Console.ResetColor();
                         WaitForKeyIfInteractive();
                         return 1;
@@ -131,6 +143,7 @@ namespace MemoryUsageChecker
             Log.Info($"Working directory: {Environment.CurrentDirectory}");
             Log.Info($"Args             : {string.Join(" ", args)}");
             Log.Info($"Parsed --top     : {topN}");
+            Log.Info($"Parsed --min-display-mb : {minDisplayMb:F2}");
             Log.Info($"Parsed --symbols : {symbolsOverride ?? "(not specified)"}");
             Log.Info($"Parsed --no-symbols: {noSymbols}");
             try
@@ -163,7 +176,11 @@ namespace MemoryUsageChecker
             int exitCode;
             try
             {
-                using var output = new OutputWriter(resultPath) { TopN = topN };
+                using var output = new OutputWriter(resultPath)
+                {
+                    TopN = topN,
+                    MinDisplayBytes = (long)(minDisplayMb * 1024 * 1024)
+                };
 
                 ITraceProcessorSettings settings = new TraceProcessorSettings { AllowLostEvents = true };
                 ITraceProcessor trace;
@@ -476,12 +493,19 @@ namespace MemoryUsageChecker
         /// <summary>Prints a one-line usage banner to stderr.</summary>
         private static void PrintUsage()
         {
-            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--top N] [--symbols <path>] [--no-symbols]");
+            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--top N] [--min-display-mb V] [--symbols <path>] [--no-symbols]");
             Console.Error.WriteLine();
             Console.Error.WriteLine("When <trace.etl> is omitted (e.g. when MemoryUsageChecker.exe is launched");
             Console.Error.WriteLine("by double-clicking it in Explorer), the tool auto-selects the most recently");
             Console.Error.WriteLine("modified *.etl file located in the same folder as the .exe, preferring");
             Console.Error.WriteLine("MemoryUsage-Trace.etl (the canonical name produced by MemoryUsageTrace.cmd).");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine("  --top N             Show up to N rows in each outer Top-N table (default 10).");
+            Console.Error.WriteLine("  --min-display-mb V  Hide inner Top-K bucket / stack rows below V MiB (default 2;");
+            Console.Error.WriteLine("                      pass 0 to disable filtering and show every row).");
+            Console.Error.WriteLine("  --symbols <path>    Override the symbol search path passed to the EventTracing SDK.");
+            Console.Error.WriteLine("  --no-symbols        Skip symbol load entirely (stacks render as raw addresses).");
         }
 
         /// <summary>

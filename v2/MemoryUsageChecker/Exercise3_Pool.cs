@@ -167,11 +167,13 @@ namespace MemoryUsageChecker
                         TopImpactingStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
                             row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
                                          .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
-                            output.TopK),
+                            output.TopK,
+                            output.MinDisplayBytes),
                         TopTransientStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
                             row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp != null)
                                          .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
-                            output.TopK)
+                            output.TopK,
+                            output.MinDisplayBytes)
                     });
                 }
             }
@@ -225,7 +227,7 @@ namespace MemoryUsageChecker
                     .OrderByDescending(x => x.NpImp)
                     .ToList();
 
-                var tagBreakdown = allTagBreakdown.Take(output.TopK).ToList();
+                var tagBreakdown = allTagBreakdown.Where(t => t.NpImp >= output.MinDisplayBytes).Take(output.TopK).ToList();
 
                 int tagRank = 0;
                 foreach (var t in tagBreakdown)

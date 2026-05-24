@@ -171,7 +171,7 @@ namespace MemoryUsageChecker
                     jsonSnapshot.TopProcessesByActiveWorkingSet.Add(jsonRow);
                 }
 
-                foreach (var cat in row.ByCategory.Take(output.TopK))
+                foreach (var cat in row.ByCategory.Where(c => c.Bytes >= output.MinDisplayBytes).Take(output.TopK))
                 {
                     double catMb = cat.Bytes / 1024.0 / 1024.0;
                     output.WriteNormal($"      {cat.Cat,-28} {catMb,8:F2} MB");

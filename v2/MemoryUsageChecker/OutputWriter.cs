@@ -51,6 +51,22 @@ namespace MemoryUsageChecker
         /// <summary>Maximum number of rows displayed per "Top K" stack list (default 5).</summary>
         public int TopK { get; init; } = 5;
 
+        /// <summary>
+        /// Minimum size (in bytes) for an inner Top-K row to be displayed in
+        /// the text report. Applied to the per-process bucket breakdown in
+        /// Exercise 1, the per-process / per-driver stack lists in
+        /// Exercise 2 and 3, and the per-pool-tag breakdown in Exercise 3.
+        /// Default is 2 MiB (2 × 1048576 bytes) so the noisy sub-2 MB
+        /// kernel-stack / page-table tail rows that dominate small processes
+        /// are filtered out. Set to <c>0</c> via <c>--min-display-mb 0</c> to
+        /// see every Top-K row regardless of size (legacy behavior).
+        /// The "+ N more …" tail summary lines automatically absorb the
+        /// filtered entries because the source lists are sorted descending,
+        /// so the threshold only ever trims a contiguous sub-threshold
+        /// suffix of the displayed Top K.
+        /// </summary>
+        public long MinDisplayBytes { get; init; } = 2L * 1024L * 1024L;
+
         /// <summary>Yellow. Section banner / exercise title.</summary>
         public void WriteHeader(string message)     => Write(message, ConsoleColor.Yellow);
         /// <summary>Cyan. Sub-section header inside an exercise.</summary>
