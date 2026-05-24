@@ -23,7 +23,8 @@ if not exist "%scriptDirectory%%wprpFileName%" (
     echo.
     echo   wget https://raw.githubusercontent.com/microsoft/eventtracing-processing-samples/master/v2/MemoryUsageChecker/Profiles/%wprpFileName% -outfile .\%wprpFileName%
     echo.
-    echo For more information, see the README in this folder.
+    echo For more information, see the project README at
+    echo   https://github.com/microsoft/eventtracing-processing-samples/tree/master/v2/MemoryUsageChecker
     echo.
     echo #########################################################################################################
     goto End

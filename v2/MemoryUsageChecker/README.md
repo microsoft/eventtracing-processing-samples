@@ -12,27 +12,60 @@ Each exercise runs independently. Sections whose required providers were not cap
 
 The easiest way is to use the WPR profile shipped alongside this sample. After `dotnet publish` (see [§4 below](#4-building-and-publishing)) the single-file `MemoryUsageChecker.exe` ships with `MemoryUsageChecker.wprp` and `MemoryUsageTrace.cmd` as sidecar files in the same folder, so a tester can collect a trace and analyze it without leaving the deploy folder.
 
-**One-click (recommended for new testers):** open an **elevated** `cmd.exe`, run `MemoryUsageTrace.cmd` (from the deploy folder next to `MemoryUsageChecker.exe`, or from `v2\MemoryUsageChecker\Profiles\` in the source tree), pick **Start Tracing → MemoryUsageChecker → Start Now**, reproduce your workload, then press a key to stop. Output lands in `%SystemRoot%\Tracing\` as `MemoryUsage-Trace.etl` plus a `*-TraceInfo.txt` and `*-System.evtx` for bug reports.
+### 1.1 One-click (recommended for new testers)
 
-**Manual:** from an **elevated** PowerShell or `cmd.exe`:
+Open an **elevated** `cmd.exe` and run **`MemoryUsageTrace.cmd`**. The script lives next to the `MemoryUsageChecker.exe` in the deploy folder after publish, or under `v2\MemoryUsageChecker\Profiles\` in the source tree.
+
+1. At the first menu, select "**Start Tracing**".
+2. At the second menu, select "**MemoryUsageChecker**" (full profile).
+3. At the next menu, choose "**Start Now**" (or "**Start From Next Boot Session**" for boot-time issues).
+4. Reproduce the workload you want to analyze.
+5. Press any key to stop tracing.
+
+By default the trace files land in `%SystemRoot%\Tracing\`:
+
+| File | Description |
+|---|---|
+| `MemoryUsage-Trace.etl` | The ETL the analyzer consumes. |
+| `MemoryUsage-TraceInfo.txt` | `wpr -status profiles collectors -details` output, OS build numbers, total/free RAM, page-file usage. |
+| `MemoryUsage-System.evtx` | Exported Windows System event log (useful for low-memory / out-of-memory events around the repro). |
+
+The script prints the list of files to share when collection finishes.
+
+### 1.2 Heap snapshots (Exercise 2 Part B)
+
+User-mode heap allocations are only captured for processes that opt in via a per-image registry flag. **Set the flag before launching the process you want to trace.** For an app called `YourApp.exe`:
 
 ```cmd
-:: 1. Start collecting (selects the Verbose profile shipped in this file)
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\YourApp.exe" /v TracingFlags /t REG_DWORD /d 1 /f
+```
+
+Remove the flag after collection:
+
+```cmd
+reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\YourApp.exe" /v TracingFlags /f
+```
+
+The opt-in is documented at <https://learn.microsoft.com/windows-hardware/test/wpt/heap-recording>. If the flag is not set, every other exercise still works — Exercise 2 Part B simply prints `[skipped - no heap snapshots in trace]` and processing continues.
+
+### 1.3 Manual wpr (advanced)
+
+If you prefer to drive WPR by hand instead of using the script, open an **elevated** PowerShell or `cmd.exe`:
+
+```cmd
+:: Start (selects the Verbose profile shipped in this file)
 wpr -start v2\MemoryUsageChecker\Profiles\MemoryUsageChecker.wprp!MemoryUsageChecker -filemode
 
-:: 2. Reproduce the workload you want to analyze
+:: Reproduce the workload you want to analyze
 
-:: 3. Stop and save the trace
+:: Stop and save the trace
 wpr -stop MyTrace.etl
+
+:: Or discard an in-flight recording without writing a file
+wpr -cancel
 ```
 
-For user-mode heap snapshots (Exercise 2 Part B), set the per-image opt-in flag once before launching the process you want to trace:
-
-```cmd
-reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\<app.exe>" /v TracingFlags /t REG_DWORD /d 1 /f
-```
-
-See [`Profiles/README.md`](./Profiles/README.md) for the full collection walkthrough, the list of providers captured, and how to drive `wpr` by hand.
+### 1.4 Building your own profile (alternative)
 
 If you prefer to assemble your own profile in **Windows Performance Recorder (WPR)**, enable the providers below to populate all three exercise sections from a single trace:
 
@@ -152,4 +185,5 @@ publish\
 - [v1→v2 Migration Guide](../../EventTracing%20v1%20to%20v2%20Migration%20Guide.md)
 - Microsoft Learn — WPT Memory Footprint Optimization Exercises: [1](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/memory-footprint-optimization-exercise-1), [2](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/memory-footprint-optimization-exercise-2), [3](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/memory-footprint-optimization-exercise-3)
 - [Windows Performance Recorder — Recording Profiles](https://learn.microsoft.com/windows-hardware/test/wpt/recording-profiles)
+- [WPR XSD reference](https://learn.microsoft.com/windows-hardware/test/wpt/wprcontrolprofiles-schema)
 - [Heap recording opt-in](https://learn.microsoft.com/windows-hardware/test/wpt/heap-recording)
