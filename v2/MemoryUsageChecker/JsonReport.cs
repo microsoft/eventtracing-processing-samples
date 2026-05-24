@@ -91,10 +91,14 @@ namespace MemoryUsageChecker
             public DateTime? StopTimeUtc { get; set; }
             /// <summary>Trace duration in seconds (Stop - Start).</summary>
             public double? DurationSeconds { get; set; }
-            /// <summary>Human-readable OS summary as printed in the text header (e.g. <c>"v10.0.26100.4061 / Amd64 / Machine=WIN-LAB"</c>).</summary>
+            /// <summary>Human-readable OS summary as printed in the text header (e.g. <c>"Windows 11 Enterprise Insider Preview / Version 25H2 (OS Build 26220.8491) / Amd64 / Machine=Flow_Z13"</c>).</summary>
             public string OsSummary { get; set; }
-            /// <summary>Best-effort raw OS version (e.g. <c>"10.0.26100.4061"</c>), when the SDK exposes it.</summary>
+            /// <summary>Best-effort raw OS version including the Update Build Revision (e.g. <c>"10.0.26220.8491"</c>), composed from <c>ISystemMetadata.BuildInfo</c> when available.</summary>
             public string OsVersion { get; set; }
+            /// <summary>Best-effort OS product name from <c>BuildInfo.ProductName</c> (e.g. <c>"Windows 11 Enterprise Insider Preview"</c>).</summary>
+            public string OsProductName { get; set; }
+            /// <summary>Windows marketing release label (e.g. <c>"25H2"</c>) derived from the build number. Not stored in the ETL — best-effort lookup.</summary>
+            public string OsDisplayVersion { get; set; }
             /// <summary>Best-effort raw OS build-lab string, when the SDK exposes it.</summary>
             public string OsBuildLab { get; set; }
             /// <summary>Best-effort architecture string, when the SDK exposes it.</summary>

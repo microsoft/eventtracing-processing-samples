@@ -189,42 +189,71 @@ namespace MemoryUsageChecker
         public static string FormatOsHeader(ITraceMetadata trace, ISystemMetadata system)
         {
             var parts = new List<string>();
-            // Friendly OS name
-            string osName = FirstNonEmpty(trace, "OSName")
-                         ?? FirstNonEmpty(system, "OSName")
-                         ?? FirstNonEmpty(trace, "OperatingSystemName")
-                         ?? FirstNonEmpty(system, "OperatingSystemName");
-            if (!string.IsNullOrEmpty(osName)) parts.Add(osName);
 
-            // Numeric version (Major.Minor.Build.UBR)
-            string osVer = FirstNonEmpty(trace, "OSVersion")
-                        ?? FirstNonEmpty(system, "OSVersion");
-            if (string.IsNullOrEmpty(osVer))
+            // Pull from ISystemMetadata.BuildInfo first — it's the only place
+            // the SDK surfaces the full Update Build Revision ("UBR", e.g.
+            // 8491 in 26220.8491) plus a friendly product name. The kernel
+            // OSVersion property only carries Major.Minor.Build.
+            object buildInfo = SafeGetMember(system, "BuildInfo");
+            int? buildNumber   = SafeReadNullableInt(buildInfo, "BuildNumber");
+            int? buildRevision = SafeReadNullableInt(buildInfo, "BuildRevision");
+            string productName = FirstNonEmpty(buildInfo, "ProductName");
+            string archFromBuildInfo = FirstNonEmpty(buildInfo, "Architecture");
+
+            // 1. Product name (e.g. "Windows 11 Enterprise Insider Preview")
+            if (!string.IsNullOrEmpty(productName))
             {
-                string composed = ComposeNumericVersion(trace) ?? ComposeNumericVersion(system);
-                if (!string.IsNullOrEmpty(composed)) osVer = composed;
+                parts.Add(productName);
             }
-            if (!string.IsNullOrEmpty(osVer)) parts.Add($"v{osVer}");
+            else
+            {
+                string osName = FirstNonEmpty(trace, "OSName")
+                             ?? FirstNonEmpty(system, "OSName")
+                             ?? FirstNonEmpty(trace, "OperatingSystemName")
+                             ?? FirstNonEmpty(system, "OperatingSystemName");
+                if (!string.IsNullOrEmpty(osName)) parts.Add(osName);
+            }
 
-            // Build lab string (e.g. "26100.1.amd64fre.ge_release.240331-1435")
-            string buildLab = FirstNonEmpty(trace, "OSBuildLab")
-                           ?? FirstNonEmpty(system, "OSBuildLab")
-                           ?? FirstNonEmpty(trace, "BuildLab")
-                           ?? FirstNonEmpty(system, "BuildLab");
-            if (!string.IsNullOrEmpty(buildLab)) parts.Add($"BuildLab={buildLab}");
+            // 2. Build line — prefer "Version 25H2 (OS Build 26220.8491)" to
+            // mirror what winver shows. Falls back to plain "OS Build NNNNN"
+            // when the marketing label is unknown, and finally to
+            // "v<Major.Minor.Build>" when BuildInfo isn't populated.
+            if (buildNumber.HasValue)
+            {
+                string buildText = buildRevision.HasValue
+                    ? $"{buildNumber.Value}.{buildRevision.Value}"
+                    : $"{buildNumber.Value}";
+                string displayVersion = TryGetWindowsDisplayVersion(buildNumber.Value);
+                parts.Add(string.IsNullOrEmpty(displayVersion)
+                    ? $"OS Build {buildText}"
+                    : $"Version {displayVersion} (OS Build {buildText})");
+            }
+            else
+            {
+                string osVer = FirstNonEmpty(trace, "OSVersion")
+                            ?? FirstNonEmpty(system, "OSVersion");
+                if (string.IsNullOrEmpty(osVer))
+                {
+                    string composed = ComposeNumericVersion(trace) ?? ComposeNumericVersion(system);
+                    if (!string.IsNullOrEmpty(composed)) osVer = composed;
+                }
+                if (!string.IsNullOrEmpty(osVer)) parts.Add($"v{osVer}");
+            }
 
-            // Architecture (Amd64, Arm64, ...)
-            string arch = FirstNonEmpty(trace, "Architecture")
+            // 3. Architecture (Amd64, Arm64, ...)
+            string arch = archFromBuildInfo
+                       ?? FirstNonEmpty(trace, "Architecture")
                        ?? FirstNonEmpty(system, "Architecture")
                        ?? FirstNonEmpty(trace, "ProcessorArchitecture")
                        ?? FirstNonEmpty(system, "ProcessorArchitecture");
             if (!string.IsNullOrEmpty(arch)) parts.Add(arch);
 
-            // Machine / host name
+            // 4. Machine / host name
             string machine = FirstNonEmpty(trace, "MachineName")
                           ?? FirstNonEmpty(system, "MachineName")
                           ?? FirstNonEmpty(trace, "ComputerName")
-                          ?? FirstNonEmpty(system, "ComputerName");
+                          ?? FirstNonEmpty(system, "ComputerName")
+                          ?? FirstNonEmpty(system, "Name");
             if (!string.IsNullOrEmpty(machine)) parts.Add($"Machine={machine}");
 
             return parts.Count == 0 ? "(OS info not available in trace metadata)" : string.Join(" / ", parts);
@@ -241,6 +270,121 @@ namespace MemoryUsageChecker
         /// </summary>
         public static string SafeReadProperty(object obj, string propName) => FirstNonEmpty(obj, propName);
 
+        /// <summary>
+        /// Returns the full Major.Minor.Build.UBR string (e.g. <c>"10.0.26220.8491"</c>)
+        /// for the JSON sidecar. Reads <c>BuildNumber</c> + <c>BuildRevision</c>
+        /// from <c>ISystemMetadata.BuildInfo</c> for the build/UBR and uses
+        /// the kernel <c>OSVersion</c> for major/minor. Falls back to whatever
+        /// <c>OSVersion</c> exposes when <c>BuildInfo</c> isn't populated.
+        /// Returns <c>null</c> when neither source has data.
+        /// </summary>
+        public static string GetOsVersionWithRevision(ITraceMetadata trace, ISystemMetadata system)
+        {
+            object bi = SafeGetMember(system, "BuildInfo");
+            int? build = SafeReadNullableInt(bi, "BuildNumber");
+            int? ubr   = SafeReadNullableInt(bi, "BuildRevision");
+            Version osVer = SafeGetMember(system, "OSVersion") as Version
+                         ?? SafeGetMember(trace,  "OSVersion") as Version;
+            if (build.HasValue)
+            {
+                int major = osVer?.Major ?? 10;
+                int minor = osVer?.Minor ?? 0;
+                return ubr.HasValue
+                    ? $"{major}.{minor}.{build.Value}.{ubr.Value}"
+                    : $"{major}.{minor}.{build.Value}";
+            }
+            if (osVer != null)
+            {
+                return osVer.Revision >= 0
+                    ? $"{osVer.Major}.{osVer.Minor}.{osVer.Build}.{osVer.Revision}"
+                    : $"{osVer.Major}.{osVer.Minor}.{osVer.Build}";
+            }
+            string osStr = FirstNonEmpty(trace, "OSVersion") ?? FirstNonEmpty(system, "OSVersion");
+            return osStr;
+        }
+
+        /// <summary>
+        /// Returns the OS product name from <c>BuildInfo.ProductName</c>
+        /// (e.g. <c>"Windows 11 Enterprise Insider Preview"</c>), or
+        /// <c>null</c> when unavailable.
+        /// </summary>
+        public static string GetOsProductName(ISystemMetadata system)
+            => FirstNonEmpty(SafeGetMember(system, "BuildInfo"), "ProductName");
+
+        /// <summary>
+        /// Returns the Windows marketing release label for the trace's
+        /// <c>BuildInfo.BuildNumber</c> (e.g. <c>"25H2"</c>), or <c>null</c>
+        /// if the build isn't in the lookup table. This label is not stored
+        /// in the ETL — see <see cref="TryGetWindowsDisplayVersion"/>.
+        /// </summary>
+        public static string GetOsDisplayVersion(ISystemMetadata system)
+        {
+            int? build = SafeReadNullableInt(SafeGetMember(system, "BuildInfo"), "BuildNumber");
+            return build.HasValue ? TryGetWindowsDisplayVersion(build.Value) : null;
+        }
+
+        /// <summary>
+        /// Returns the build-lab string (e.g.
+        /// <c>"26220.5000.amd64fre.ge_release.250709-1212"</c>) from
+        /// <c>BuildInfo.BuildLab</c>, with reflection fallbacks for older
+        /// SDK shapes that exposed <c>OSBuildLab</c> directly.
+        /// </summary>
+        public static string GetOsBuildLab(ITraceMetadata trace, ISystemMetadata system)
+            => FirstNonEmpty(SafeGetMember(system, "BuildInfo"), "BuildLab")
+            ?? FirstNonEmpty(trace,  "OSBuildLab")
+            ?? FirstNonEmpty(system, "OSBuildLab");
+
+        /// <summary>
+        /// Best-effort map from a Windows client mainline build number to its
+        /// marketing release label (e.g. 26200 → "25H2"). The label is NOT
+        /// stored in the ETL — Windows derives it from
+        /// <c>HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DisplayVersion</c>
+        /// on the running OS — so this table has to be updated when a new
+        /// mainline build ships. When the build isn't recognized, we return
+        /// <c>null</c> and <see cref="FormatOsHeader"/> falls back to plain
+        /// <c>"OS Build NNNNN.UBR"</c> rather than guessing.
+        ///
+        /// Sources of truth (re-sync this table when either page changes):
+        ///   Windows 11: https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information
+        ///   Windows 10: https://learn.microsoft.com/en-us/windows/release-health/release-information
+        /// </summary>
+        private static string TryGetWindowsDisplayVersion(int buildNumber)
+        {
+            return buildNumber switch
+            {
+                // Windows 11 — GA / LTSC builds per the Microsoft Learn release-info page.
+                28000 => "26H1",   // GA 2026-02-10
+                26200 => "25H2",   // GA 2025-09-30
+                26100 => "24H2",   // GA 2024-10-01 (also Win 11 24H2 LTSC)
+                22631 => "23H2",   // GA 2023-10-31
+                22621 => "22H2",   // GA 2022-09-20
+                22000 => "21H2",   // GA 2021-10-05 (Windows 11 1.0)
+
+                // Windows 11 — Insider builds that flighted as the named release
+                // train (not listed on the Learn page; included so winver-style
+                // labels still resolve for Dev/Beta channel ETLs).
+                26220 => "25H2",   // Insider Dev/Beta train for 25H2
+
+                // Windows 10 — GA builds per the Microsoft Learn release-info page.
+                19045 => "22H2",
+                19044 => "21H2",
+                19043 => "21H1",
+                19042 => "20H2",
+                19041 => "2004",
+                18363 => "1909",
+                18362 => "1903",
+                17763 => "1809",
+                17134 => "1803",
+                16299 => "1709",
+                15063 => "1703",
+                14393 => "1607",
+                10586 => "1511",
+                10240 => "1507",
+
+                _ => null,
+            };
+        }
+
         // ---- internals --------------------------------------------------
 
         /// <summary>Trims whitespace; returns <c>null</c> if the result is empty.</summary>
@@ -254,6 +398,42 @@ namespace MemoryUsageChecker
         private static string SafeGet(Func<string> getter)
         {
             try { return getter(); } catch { return null; }
+        }
+
+        /// <summary>
+        /// Reflectively reads a public instance property and returns its raw
+        /// value (boxed), or <c>null</c> when the property is missing, the
+        /// value is null, or the read throws. Used to walk through complex
+        /// SDK shapes like <c>ISystemMetadata.BuildInfo</c> without taking
+        /// a hard reference on intermediate interface types.
+        /// </summary>
+        private static object SafeGetMember(object obj, string propName)
+        {
+            if (obj == null || string.IsNullOrEmpty(propName)) return null;
+            try
+            {
+                PropertyInfo p = obj.GetType().GetProperty(propName,
+                    BindingFlags.Instance | BindingFlags.Public);
+                return p?.GetValue(obj);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Reflectively reads a property whose value is an integral type
+        /// (<c>int</c>, <c>uint</c>, nullable variants, …) and returns it as
+        /// <c>int?</c>. Returns <c>null</c> when the property is missing,
+        /// the value is null, or the conversion fails.
+        /// </summary>
+        private static int? SafeReadNullableInt(object obj, string propName)
+        {
+            object v = SafeGetMember(obj, propName);
+            if (v == null) return null;
+            try { return Convert.ToInt32(v, System.Globalization.CultureInfo.InvariantCulture); }
+            catch { return null; }
         }
 
         /// <summary>

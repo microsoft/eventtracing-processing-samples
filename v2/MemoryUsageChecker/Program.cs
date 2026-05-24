@@ -436,10 +436,10 @@ namespace MemoryUsageChecker
             }
 
             jsonReport.Trace.OsSummary = ImageFormatter.FormatOsHeader(metadata, systemMetadata);
-            jsonReport.Trace.OsVersion = ImageFormatter.SafeReadProperty(metadata, "OSVersion")
-                                       ?? ImageFormatter.SafeReadProperty(systemMetadata, "OSVersion");
-            jsonReport.Trace.OsBuildLab = ImageFormatter.SafeReadProperty(metadata, "OSBuildLab")
-                                        ?? ImageFormatter.SafeReadProperty(systemMetadata, "OSBuildLab");
+            jsonReport.Trace.OsVersion = ImageFormatter.GetOsVersionWithRevision(metadata, systemMetadata);
+            jsonReport.Trace.OsProductName = ImageFormatter.GetOsProductName(systemMetadata);
+            jsonReport.Trace.OsDisplayVersion = ImageFormatter.GetOsDisplayVersion(systemMetadata);
+            jsonReport.Trace.OsBuildLab = ImageFormatter.GetOsBuildLab(metadata, systemMetadata);
             jsonReport.Trace.Architecture = ImageFormatter.SafeReadProperty(metadata, "Architecture")
                                           ?? ImageFormatter.SafeReadProperty(systemMetadata, "Architecture")
                                           ?? ImageFormatter.SafeReadProperty(metadata, "ProcessorArchitecture")
