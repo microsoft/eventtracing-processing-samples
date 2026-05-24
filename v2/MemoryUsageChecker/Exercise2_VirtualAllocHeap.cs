@@ -103,7 +103,69 @@ namespace MemoryUsageChecker
         private static void RunHeapPart(OutputWriter output, IPendingResult<IHeapSnapshotDataSource> pendingHeap)
         {
             output.WriteSubHeader("--- Heap Snapshots ---");
-            output.WriteSkipped("[not yet implemented]");
+
+            if (!pendingHeap.HasResult || pendingHeap.Result.Snapshots.Count == 0)
+            {
+                output.WriteSkipped("[skipped - heap data not present in trace.");
+                output.WriteSkipped(" Heap tracing requires the per-process TracingFlags=1 registry key documented in WPT Exercise 2 Step 1.1.]");
+                return;
+            }
+
+            // For each process, use its LATEST snapshot as the outstanding/impacting view.
+            var latestPerProcess = pendingHeap.Result.Snapshots
+                .Where(s => s.Process != null)
+                .GroupBy(s => s.Process)
+                .Select(g => g.OrderByDescending(s => s.Timestamp.Nanoseconds).First())
+                .ToList();
+
+            var allPerProcessSummary = latestPerProcess
+                .Select(s => new
+                {
+                    Process = s.Process,
+                    HeapCount = s.Allocations.Select(a => a.HeapHandle).Distinct().Count(),
+                    AllocCount = s.Allocations.Count,
+                    OutstandingBytes = s.Allocations.Sum(a => a.Size.Bytes),
+                    Snapshot = s
+                })
+                .OrderByDescending(x => x.OutstandingBytes)
+                .ToList();
+
+            var perProcessSummary = allPerProcessSummary.Take(output.TopN).ToList();
+
+            output.WriteSubHeader($"Top {output.TopN} processes by outstanding heap size (KB):");
+            int rank = 0;
+            foreach (var row in perProcessSummary)
+            {
+                rank++;
+                string line =
+                    $"  {row.Process.ImageName,-32} (pid {row.Process.Id,6})  " +
+                    $"heaps {row.HeapCount,3}  allocations {row.AllocCount,8}  outstanding {row.OutstandingBytes / 1024.0,10:F2} KB";
+                output.WriteRanked(rank, perProcessSummary.Count, line);
+            }
+            // Tail summary
+            if (allPerProcessSummary.Count > perProcessSummary.Count)
+            {
+                int tailCount = allPerProcessSummary.Count - perProcessSummary.Count;
+                double tailKb = allPerProcessSummary.Skip(perProcessSummary.Count).Sum(x => x.OutstandingBytes) / 1024.0;
+                output.WriteTail($"  + {tailCount} more processes totaling {tailKb:F2} KB outstanding");
+            }
+            output.WriteBlank();
+
+            foreach (var row in perProcessSummary)
+            {
+                // Largest heap handle for this process by outstanding bytes
+                var largestHeap = row.Snapshot.Allocations
+                    .GroupBy(a => a.HeapHandle)
+                    .Select(g => new { Handle = g.Key, Bytes = g.Sum(a => a.Size.Bytes), Allocs = g.ToList() })
+                    .OrderByDescending(g => g.Bytes)
+                    .FirstOrDefault();
+
+                if (largestHeap == null) continue;
+
+                output.WriteSubHeader($"Top {output.TopK} alloc stacks on largest heap (handle 0x{largestHeap.Handle:X}) of {row.Process.ImageName} (pid {row.Process.Id})");
+                WriteTopStacks(output, "Outstanding", largestHeap.Allocs.Select(a => (a.Stack, a.Size.Bytes)));
+                output.WriteBlank();
+            }
         }
 
         // ---- Shared stack-aggregation helper (used by Part A AND Task 6's Part B) ----
@@ -141,6 +203,42 @@ namespace MemoryUsageChecker
                 int tailCount = allGroups.Count - topGroups.Count;
                 double tailMb = allGroups.Skip(topGroups.Count).Sum(x => x.TotalBytes) / 1048576.0;
                 output.WriteTail($"      + {tailCount} more stack bucket(s) totaling {tailMb:F2} MB");
+            }
+        }
+
+        internal static void WriteTopStacks(OutputWriter output, string label, IEnumerable<(IThreadStack Stack, long SizeBytes)> sized)
+        {
+            var sizedList = sized.Where(x => x.Stack != null).ToList();
+            var allGroups = sizedList
+                .GroupBy(x => string.Join(" | ", x.Stack.Frames.Take(12).Select(FormatFrame)))
+                .Select(g => new { Key = g.Key, TotalBytes = g.Sum(x => x.SizeBytes), Sample = g.First().Stack })
+                .OrderByDescending(x => x.TotalBytes)
+                .ToList();
+
+            if (allGroups.Count == 0)
+            {
+                output.WriteSkipped($"    {label}: (no stacks)");
+                return;
+            }
+
+            var topGroups = allGroups.Take(output.TopK).ToList();
+            output.WriteData($"    {label}:");
+            int idx = 0;
+            foreach (var grp in topGroups)
+            {
+                idx++;
+                output.WriteRanked(idx, topGroups.Count, $"      #{idx} {grp.TotalBytes / 1024.0,10:F2} KB  ({sizedList.Count(x => string.Join(" | ", x.Stack.Frames.Take(12).Select(FormatFrame)) == grp.Key)} alloc(s))");
+                foreach (var frame in grp.Sample.Frames.Take(12))
+                {
+                    output.WriteStackFrame($"        {FormatFrame(frame)}");
+                }
+            }
+            // Tail summary for stacks
+            if (allGroups.Count > topGroups.Count)
+            {
+                int tailCount = allGroups.Count - topGroups.Count;
+                double tailKb = allGroups.Skip(topGroups.Count).Sum(x => x.TotalBytes) / 1024.0;
+                output.WriteTail($"      + {tailCount} more stack bucket(s) totaling {tailKb:F2} KB");
             }
         }
 
