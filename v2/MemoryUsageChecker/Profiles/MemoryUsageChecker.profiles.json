@@ -1,0 +1,58 @@
+{
+  "$comment": [
+    "MemoryUsageChecker default budget profiles.",
+    "Edit the numbers below to retune the OEM image-fit verdict; restart the .exe to pick up the changes.",
+    "Set 'defaultProfile' to choose which tier runs when no --profile is passed on the command line.",
+    "Per-item budgets gate row coloring (red over-budget / yellow near-budget / green under-budget); total budgets gate the per-category PASS / WATCH / FAIL banner.",
+    "All MB values are MiB (1 MiB = 1,048,576 bytes).",
+    "To restore this file to defaults after editing, delete it and re-run MemoryUsageChecker.exe (the tool will seed a fresh copy) or run: MemoryUsageChecker.exe --write-default-profiles"
+  ],
+  "schemaVersion": "1.0",
+  "defaultProfile": "8gb",
+  "verdictThresholds": {
+    "$comment": "Percent of the budget at which a row turns yellow (warnAtPercent) or red (failAtPercent). Strictly: actual > failAt = Fail; actual >= warnAt = Warn; else Pass.",
+    "warnAtPercent": 80,
+    "failAtPercent": 100
+  },
+  "profiles": {
+    "16gb": {
+      "$comment": "Relaxed tier for higher-end OEM devices with 16 GB total RAM. Use as a soft ceiling so the preload does not bloat over time.",
+      "topProcesses": 15,
+      "topDrivers": 10,
+      "perProcessWorkingSetBudgetMb": 400,
+      "perProcessVirtualAllocBudgetMb": 200,
+      "perDriverPoolBudgetMb": 10,
+      "perDriverCodeBudgetMb": 4,
+      "totalUserWorkingSetBudgetMb": 3072,
+      "totalDriverPoolBudgetMb": 512,
+      "totalDriverCodeBudgetMb": 128,
+      "minDisplayMb": 4
+    },
+    "8gb": {
+      "$comment": "Default tier. Calibrated against a real Windows 11 24H2 OEM-like trace so the worst contributor in each category turns red.",
+      "topProcesses": 15,
+      "topDrivers": 10,
+      "perProcessWorkingSetBudgetMb": 200,
+      "perProcessVirtualAllocBudgetMb": 100,
+      "perDriverPoolBudgetMb": 5,
+      "perDriverCodeBudgetMb": 2,
+      "totalUserWorkingSetBudgetMb": 1536,
+      "totalDriverPoolBudgetMb": 256,
+      "totalDriverCodeBudgetMb": 64,
+      "minDisplayMb": 2
+    },
+    "4gb": {
+      "$comment": "Tightest tier. Targets 4 GB-class devices; per-item and total budgets are roughly halved vs the 8 GB tier.",
+      "topProcesses": 15,
+      "topDrivers": 10,
+      "perProcessWorkingSetBudgetMb": 100,
+      "perProcessVirtualAllocBudgetMb": 50,
+      "perDriverPoolBudgetMb": 2,
+      "perDriverCodeBudgetMb": 1,
+      "totalUserWorkingSetBudgetMb": 750,
+      "totalDriverPoolBudgetMb": 128,
+      "totalDriverCodeBudgetMb": 32,
+      "minDisplayMb": 1
+    }
+  }
+}

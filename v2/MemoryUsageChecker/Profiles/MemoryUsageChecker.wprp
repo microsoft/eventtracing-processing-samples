@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    © Microsoft Corporation. All rights reserved.
+
+    Windows Performance Recorder profile for the MemoryUsageChecker sample.
+    Captures every data source MemoryUsageChecker consumes:
+
+      - Resident Set / Working Set sampling     (Exercise 1, Exercise 3 driver code footprint)
+      - VirtualAlloc commit / decommit          (Exercise 2 Part A)
+      - User-mode heap allocations              (Exercise 2 Part B)
+      - Kernel pool allocations                 (Exercise 3 Part A)
+      - Image load / unload                     (all exercises, symbols)
+
+    USAGE (run an elevated PowerShell or cmd):
+
+      :: 1. Start collecting
+      wpr -start MemoryUsageChecker.wprp!MemoryUsageChecker -filemode
+
+      :: 2. Reproduce the workload you want to analyze
+
+      :: 3. Stop and save the trace
+      wpr -stop MyTrace.etl
+
+      :: 4. Analyze
+      MemoryUsageChecker.exe MyTrace.etl
+
+    HEAP TRACING NOTE:
+    User-mode heap snapshots are only captured for processes that opt in via the
+    per-image registry flag below. Set this BEFORE launching the process you want
+    to trace (one-time per machine, per executable), then start the trace and
+    launch the process:
+
+      reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\<app.exe>" /v TracingFlags /t REG_DWORD /d 1 /f
+
+    See https://learn.microsoft.com/windows-hardware/test/wpt/heap-recording
+-->
+<WindowsPerformanceRecorder Version="1.0"
+                            Author="MemoryUsageChecker sample"
+                            Copyright="© Microsoft Corporation"
+                            Comments="Captures Resident Set, VirtualAlloc, Heap, and Pool data needed by the MemoryUsageChecker sample (WPT Memory Footprint Optimization Exercises 1-3).">
+  <Profiles>
+
+    <!-- ================================================================ -->
+    <!-- Collectors                                                       -->
+    <!-- ================================================================ -->
+
+    <!-- Kernel events: keywords + stack walks for memory operations. -->
+    <SystemCollector Id="SystemCollector_MemoryUsageChecker" Name="MemoryUsageChecker System Collector">
+      <BufferSize Value="1024" />
+      <Buffers Value="1024" />
+    </SystemCollector>
+
+    <!-- User-mode ETW providers (memory analytics, Win32 heap range map). -->
+    <EventCollector Id="EventCollector_MemoryUsageChecker" Name="MemoryUsageChecker Event Collector">
+      <BufferSize Value="1024" />
+      <Buffers Value="128" />
+    </EventCollector>
+
+    <!-- Dedicated buffer pool for high-throughput user-mode heap events.
+         Required for UseHeapSnapshots(). -->
+    <HeapEventCollector Id="HeapEventCollector_MemoryUsageChecker" Name="MemoryUsageChecker Heap Event Collector">
+      <BufferSize Value="1024" />
+      <Buffers Value="256" />
+    </HeapEventCollector>
+
+    <!-- ================================================================ -->
+    <!-- Providers                                                        -->
+    <!-- ================================================================ -->
+
+    <!-- All kernel keywords + stack walks needed by Microsoft.Windows.EventTracing v2
+         memory data sources (UseResidentSetData, UseCommitData, UsePoolAllocations,
+         UseHeapSnapshots, UseProcesses, UseMetadata, UseSymbols). -->
+    <SystemProvider Id="SystemProvider_MemoryUsageChecker">
+      <Keywords>
+        <Keyword Value="CpuConfig" />            <!-- UseMetadata -->
+        <Keyword Value="DiskIO" />               <!-- file backing for resident-set images -->
+        <Keyword Value="HardFaults" />           <!-- page faults / working-set behavior -->
+        <Keyword Value="IdealProcessor" />       <!-- thread scheduling context -->
+        <Keyword Value="Loader" />               <!-- image load/unload (symbols, IImage) -->
+        <Keyword Value="Memory" />               <!-- core memory activity -->
+        <Keyword Value="MemoryInfo" />           <!-- per-process memory counters -->
+        <Keyword Value="MemoryInfoWS" />         <!-- working-set sampling -> resident-set snapshots -->
+        <Keyword Value="Pool" />                 <!-- ExAllocatePool* events -->
+        <Keyword Value="ProcessThread" />        <!-- UseProcesses -->
+        <Keyword Value="SampledProfile" />       <!-- CPU sample stacks (attribution help) -->
+        <Keyword Value="Session" />              <!-- session boundary metadata -->
+        <Keyword Value="ThreadPriority" />       <!-- scheduling context -->
+        <Keyword Value="VAMap" />                <!-- file backing -> resident-set Path/Category -->
+        <Keyword Value="VirtualAllocation" />    <!-- UseCommitData -->
+      </Keywords>
+      <Stacks>
+        <Stack Value="CSwitch" />                <!-- generic context-switch stacks -->
+        <Stack Value="HeapAllocation" />         <!-- back-up stack source for heap events -->
+        <Stack Value="HeapReallocation" />
+        <Stack Value="PoolAllocation" />         <!-- pool alloc stacks (Exercise 3) -->
+        <Stack Value="PoolAllocationSession" />
+        <!--
+            PoolFree / PoolFreeSession stacks intentionally NOT captured.
+            MemoryUsageChecker only reads i.Stack (the ALLOCATION stack) and
+            i.FreeTimestamp (just a nullable timestamp, captured regardless of
+            whether free-event stacks are on). Enabling pool-free stack walks
+            roughly DOUBLES the on-disk size of pool data on busy systems for
+            zero analytical benefit — long captures with pool-free stacks
+            enabled have been observed at 10+ GB. Leave them off.
+        -->
+        <Stack Value="ProcessCreate" />
+        <Stack Value="ThreadCreate" />
+        <Stack Value="ThreadDCEnd" />
+        <Stack Value="VirtualAllocation" />      <!-- commit stacks (Exercise 2 Part A) -->
+      </Stacks>
+    </SystemProvider>
+
+    <!-- Microsoft-Windows-Kernel-Memory: memory analytics events used by the
+         Microsoft.Windows.EventTracing v2 stack to categorize resident-set pages
+         and attribute commit lifetimes. Always enable for memory profiles. -->
+    <EventProvider Id="EventProvider_KernelMemory"
+                   Name="b7a19fcd-15ba-41ba-a3d7-dc352d5f79ba"
+                   NonPagedMemory="true" />
+
+    <!-- Win32HeapRanges: emits the user-mode heap address ranges used to
+         classify resident-set pages as ResidentSetPageCategory.Win32Heap.
+         Without this, Win32Heap-attributed pages collapse into Unknown. -->
+    <EventProvider Id="EventProvider_Win32HeapRanges"
+                   Name="Win32HeapRanges"
+                   NonPagedMemory="true" />
+
+    <!-- Microsoft-Windows-Kernel-EventTracing: collector health (lost events,
+         buffer overruns). Strongly recommended so MemoryUsageChecker can
+         honor AllowLostEvents and surface trace-quality issues. -->
+    <EventProvider Id="EventProvider_KernelEventTracing"
+                   Name="Microsoft-Windows-Kernel-EventTracing"
+                   Level="15">
+      <Keywords>
+        <Keyword Value="0x40" />
+      </Keywords>
+    </EventProvider>
+
+    <!-- Microsoft-Windows-Performance-Recorder-Control: WPR control events
+         (used by the recorder itself to mark start/stop/save boundaries). -->
+    <EventProvider Id="EventProvider_PerformanceRecorderControl"
+                   Name="Microsoft-Windows-Performance-Recorder-Control">
+      <Keywords>
+        <Keyword Value="0x10000" />
+      </Keywords>
+    </EventProvider>
+
+    <!-- Heap tracing: empty provider = WPR enables heap tracing for any process
+         that has TracingFlags=1 in its Image File Execution Options registry key.
+         See the header comment for the exact reg add command. -->
+    <HeapEventProvider Id="HeapEventProvider_MemoryUsageChecker" />
+
+    <!-- ================================================================ -->
+    <!-- Profiles                                                          -->
+    <!-- WPR requires Profile Ids to follow Name.DetailLevel.LoggingMode.  -->
+    <!-- Both Verbose and Light are required; they are identical here      -->
+    <!-- because every data source MemoryUsageChecker needs is already at  -->
+    <!-- the minimum useful detail level.                                  -->
+    <!-- ================================================================ -->
+
+    <Profile Id="MemoryUsageChecker.Verbose.File"
+             Name="MemoryUsageChecker"
+             Description="Captures resident-set, VirtualAlloc, heap, and pool data needed by the MemoryUsageChecker sample (WPT Memory Footprint Optimization Exercises 1-3)."
+             DetailLevel="Verbose"
+             LoggingMode="File">
+      <Collectors>
+        <SystemCollectorId Value="SystemCollector_MemoryUsageChecker">
+          <SystemProviderId Value="SystemProvider_MemoryUsageChecker" />
+        </SystemCollectorId>
+        <EventCollectorId Value="EventCollector_MemoryUsageChecker">
+          <EventProviders>
+            <EventProviderId Value="EventProvider_KernelMemory" />
+            <EventProviderId Value="EventProvider_Win32HeapRanges" />
+            <EventProviderId Value="EventProvider_KernelEventTracing" />
+            <EventProviderId Value="EventProvider_PerformanceRecorderControl" />
+          </EventProviders>
+        </EventCollectorId>
+        <HeapEventCollectorId Value="HeapEventCollector_MemoryUsageChecker">
+          <HeapEventProviders>
+            <HeapEventProviderId Value="HeapEventProvider_MemoryUsageChecker" />
+          </HeapEventProviders>
+        </HeapEventCollectorId>
+      </Collectors>
+    </Profile>
+
+    <Profile Id="MemoryUsageChecker.Light.File"
+             Name="MemoryUsageChecker"
+             Description="Captures resident-set, VirtualAlloc, heap, and pool data needed by the MemoryUsageChecker sample (WPT Memory Footprint Optimization Exercises 1-3)."
+             DetailLevel="Light"
+             LoggingMode="File"
+             Base="MemoryUsageChecker.Verbose.File" />
+
+  </Profiles>
+</WindowsPerformanceRecorder>

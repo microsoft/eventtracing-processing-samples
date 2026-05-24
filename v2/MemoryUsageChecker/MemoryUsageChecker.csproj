@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+		<!-- Embed PDB into the assembly so published output is a single .exe. -->
+		<DebugType>embedded</DebugType>
+	</PropertyGroup>
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Windows.EventTracing" Version="2.0.711-preview" />
+	</ItemGroup>
+	<ItemGroup>
+		<!--
+		Ship the WPR collection profile and the one-click trace-collection script
+		next to the built (and published) MemoryUsageChecker.exe so a tester can
+		capture a trace and analyze it from a single folder. <Link> flattens the
+		Profiles\ source path to the output root. ExcludeFromSingleFile keeps them
+		visible as real sidecar files in the publish folder rather than embedding
+		them inside the single-file bundle.
+		-->
+		<Content Include="Profiles\MemoryUsageChecker.wprp">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+		<Content Include="Profiles\MemoryUsageTrace.cmd">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+		<!--
+		Ship the user-editable budget profiles file next to the .exe so
+		OEMs / ODMs can retune the 16 GB / 8 GB / 4 GB image-fit budgets
+		(and the warn / fail verdict percentages) by editing a single
+		text file - no command-line arguments required. The double-click
+		workflow then reads these values automatically. The same JSON is
+		regenerable at runtime via the write-default-profiles flag, but
+		shipping it ensures the released drop is immediately
+		self-documenting.
+		-->
+		<Content Include="Profiles\MemoryUsageChecker.profiles.json">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+		<!--
+		Ship the project README next to MemoryUsageChecker.exe so the released
+		binary drop (zip / loose folder) is self-documenting for external
+		testers and IHVs who never see the source repo. The README is the
+		canonical source - linking the project copy avoids drift.
+		-->
+		<Content Include="README.md">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+	</ItemGroup>
+	<!--
+	Microsoft.Windows.EventTracing pulls in Microsoft.Windows.Xperfplugin.SymCredentialProvider,
+	which ships empty 'Catalog' and 'CredentialProviders' folders into every output that
+	references it. These folders are inert at runtime - they exist only as packaging stubs
+	for an internal symbol-credential helper that ships no managed bits via this path. Strip
+	them from the publish drop so the released directory contains only files an external user
+	actually needs: MemoryUsageChecker.exe, MemoryUsageChecker.wprp, MemoryUsageTrace.cmd, and
+	README.md.
+	-->
+	<Target Name="RemoveEmptyPublishStubs" AfterTargets="Publish">
+		<RemoveDir Directories="$(PublishDir)Catalog;$(PublishDir)CredentialProviders" />
+	</Target>
+</Project>
