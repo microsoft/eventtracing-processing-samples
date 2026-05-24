@@ -336,3 +336,7 @@ ASALocalRun/
 # MFractors (Xamarin productivity tool) working folder 
 .mfractor/
 *.txt
+
+# Personal release-engineering notes - kept on the build machine only,
+# not part of the open-source sample drop.
+/v2/MemoryUsageChecker/RELEASING.md

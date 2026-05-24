@@ -55,4 +55,108 @@
 	<Target Name="RemoveEmptyPublishStubs" AfterTargets="Publish">
 		<RemoveDir Directories="$(PublishDir)Catalog;$(PublishDir)CredentialProviders" />
 	</Target>
+	<!--
+	Opt-in Authenticode signing for the published .exe. Runs after the empty-stub cleanup
+	so we sign exactly the file an external user will receive. Skips itself when none of
+	the signing env vars below are set, so CI / contributors without a code-signing
+	certificate are not blocked.
+
+	Configuration (environment variables only - never commit any of these):
+	  MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT  SHA-1 thumbprint of a code-signing cert
+	                                           installed in CurrentUser\My or LocalMachine\My.
+	                                           Preferred path - no password ever touches disk.
+	  MEMORYUSAGECHECKER_SIGN_PFX_PATH         Fallback: path to a .pfx file (requires *_PASSWORD).
+	  MEMORYUSAGECHECKER_SIGN_PFX_PASSWORD     Password for the .pfx above.
+	  MEMORYUSAGECHECKER_SIGN_TIMESTAMP_URL    Optional RFC 3161 server.
+	                                           Defaults to http://timestamp.digicert.com.
+	  MEMORYUSAGECHECKER_SIGN_SKIP_VERIFY      Set to 'true' to downgrade verify failures
+	                                           to warnings. Use only with self-signed dev
+	                                           certs whose root is not trusted on this
+	                                           machine - never set for an official release.
+
+	No PowerShell script is used; signtool.exe is invoked directly via Exec. signtool is
+	discovered via a tiny inline RoslynCodeTaskFactory task that prefers PATH, then falls
+	back to the newest x64 build under %ProgramFiles(x86)%\Windows Kits\10\bin\.
+	-->
+	<UsingTask TaskName="FindSignTool" TaskFactory="RoslynCodeTaskFactory"
+			   AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+		<ParameterGroup>
+			<Path ParameterType="System.String" Output="true" />
+		</ParameterGroup>
+		<Task>
+			<Using Namespace="System.IO" />
+			<Using Namespace="System.Linq" />
+			<Code Type="Fragment" Language="cs"><![CDATA[
+				string found = null;
+				foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(';'))
+				{
+					try
+					{
+						var candidate = System.IO.Path.Combine(dir.Trim(), "signtool.exe");
+						if (File.Exists(candidate)) { found = candidate; break; }
+					}
+					catch { }
+				}
+				if (found == null)
+				{
+					var kitRoot = System.IO.Path.Combine(
+						Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+						"Windows Kits", "10", "bin");
+					if (Directory.Exists(kitRoot))
+					{
+						found = Directory.EnumerateFiles(kitRoot, "signtool.exe", SearchOption.AllDirectories)
+							.Where(p => p.IndexOf(@"\x64\", StringComparison.OrdinalIgnoreCase) >= 0)
+							.OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+							.LastOrDefault();
+					}
+				}
+				Path = found ?? "signtool.exe";
+			]]></Code>
+		</Task>
+	</UsingTask>
+	<Target Name="SignPublishedExecutable" AfterTargets="RemoveEmptyPublishStubs"
+			Condition=" '$(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT)' != '' OR '$(MEMORYUSAGECHECKER_SIGN_PFX_PATH)' != '' ">
+		<!--
+		Normalise PublishDir to an absolute path with no trailing backslash: the Windows
+		command-line parser treats the sequence \" as an escaped quote, which would
+		otherwise corrupt the quoted argument to signtool.
+		-->
+		<PropertyGroup>
+			<_SignPublishDirAbs>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\$(PublishDir)').TrimEnd('\'))</_SignPublishDirAbs>
+			<_SignTarget>$(_SignPublishDirAbs)\MemoryUsageChecker.exe</_SignTarget>
+			<_SignTimestampUrl Condition=" '$(MEMORYUSAGECHECKER_SIGN_TIMESTAMP_URL)' != '' ">$(MEMORYUSAGECHECKER_SIGN_TIMESTAMP_URL)</_SignTimestampUrl>
+			<_SignTimestampUrl Condition=" '$(_SignTimestampUrl)' == '' ">http://timestamp.digicert.com</_SignTimestampUrl>
+		</PropertyGroup>
+		<Error Text="MEMORYUSAGECHECKER_SIGN_PFX_PATH is set but MEMORYUSAGECHECKER_SIGN_PFX_PASSWORD is empty."
+			   Condition=" '$(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT)' == '' AND '$(MEMORYUSAGECHECKER_SIGN_PFX_PATH)' != '' AND '$(MEMORYUSAGECHECKER_SIGN_PFX_PASSWORD)' == '' " />
+		<Error Text="Sign: target binary not found at $(_SignTarget). Has Publish completed?"
+			   Condition="!Exists('$(_SignTarget)')" />
+		<FindSignTool>
+			<Output TaskParameter="Path" PropertyName="_SignToolPath" />
+		</FindSignTool>
+		<Message Importance="high" Text="Sign: signtool = $(_SignToolPath)" />
+		<Message Importance="high" Text="Sign: target   = $(_SignTarget)" />
+		<Message Importance="high" Text="Sign: tsa url  = $(_SignTimestampUrl)" />
+		<Message Importance="high" Text="Sign: mode     = cert-store (thumbprint)"
+				 Condition=" '$(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT)' != '' " />
+		<Message Importance="high" Text="Sign: mode     = pfx file"
+				 Condition=" '$(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT)' == '' AND '$(MEMORYUSAGECHECKER_SIGN_PFX_PATH)' != '' " />
+		<Exec Command="&quot;$(_SignToolPath)&quot; sign /fd SHA256 /tr $(_SignTimestampUrl) /td SHA256 /v /sha1 $(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT) &quot;$(_SignTarget)&quot;"
+			  IgnoreStandardErrorWarningFormat="true"
+			  Condition=" '$(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT)' != '' " />
+		<Exec Command="&quot;$(_SignToolPath)&quot; sign /fd SHA256 /tr $(_SignTimestampUrl) /td SHA256 /v /f &quot;$(MEMORYUSAGECHECKER_SIGN_PFX_PATH)&quot; /p &quot;$(MEMORYUSAGECHECKER_SIGN_PFX_PASSWORD)&quot; &quot;$(_SignTarget)&quot;"
+			  IgnoreStandardErrorWarningFormat="true"
+			  Condition=" '$(MEMORYUSAGECHECKER_SIGN_CERT_THUMBPRINT)' == '' AND '$(MEMORYUSAGECHECKER_SIGN_PFX_PATH)' != '' " />
+		<Exec Command="&quot;$(_SignToolPath)&quot; verify /pa /v &quot;$(_SignTarget)&quot;"
+			  IgnoreStandardErrorWarningFormat="true"
+			  IgnoreExitCode="true">
+			<Output TaskParameter="ExitCode" PropertyName="_SignVerifyExitCode" />
+		</Exec>
+		<Warning Text="Sign: verify failed (exit $(_SignVerifyExitCode)) on $(_SignTarget) but MEMORYUSAGECHECKER_SIGN_SKIP_VERIFY=true; treating as non-fatal. Do NOT use this option for official releases."
+				 Condition=" '$(_SignVerifyExitCode)' != '0' AND '$(MEMORYUSAGECHECKER_SIGN_SKIP_VERIFY)' == 'true' " />
+		<Error Text="Sign: verify failed (exit $(_SignVerifyExitCode)) on $(_SignTarget). If you are using a self-signed dev cert whose root is not trusted on this machine, set MEMORYUSAGECHECKER_SIGN_SKIP_VERIFY=true."
+			   Condition=" '$(_SignVerifyExitCode)' != '0' AND '$(MEMORYUSAGECHECKER_SIGN_SKIP_VERIFY)' != 'true' " />
+		<Message Importance="high" Text="Sign: OK - $(_SignTarget) signed and verified."
+				 Condition=" '$(_SignVerifyExitCode)' == '0' " />
+	</Target>
 </Project>
