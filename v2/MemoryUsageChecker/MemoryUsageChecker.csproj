@@ -9,4 +9,26 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Windows.EventTracing" Version="2.0.711-preview" />
 	</ItemGroup>
+	<ItemGroup>
+		<!--
+		Ship the WPR collection profile and the one-click trace-collection script
+		next to the built (and published) MemoryUsageChecker.exe so a tester can
+		capture a trace and analyze it from a single folder. <Link> flattens the
+		Profiles\ source path to the output root. ExcludeFromSingleFile keeps them
+		visible as real sidecar files in the publish folder rather than embedding
+		them inside the single-file bundle.
+		-->
+		<Content Include="Profiles\MemoryUsageChecker.wprp">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+		<Content Include="Profiles\MemoryUsageTrace.cmd">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
+	</ItemGroup>
 </Project>

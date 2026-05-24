@@ -36,6 +36,8 @@ By default the trace files land in `%SystemRoot%\Tracing\`:
 | `MemoryUsage-TraceInfo.txt` | `wpr -status profiles collectors -details` output, OS build numbers, total/free RAM, page-file usage. |
 | `MemoryUsage-System.evtx` | Exported Windows System event log (useful for low-memory / out-of-memory events around the repro). |
 
+> **Tip:** After `dotnet publish` produces the single-file `MemoryUsageChecker.exe`, the same `MemoryUsageChecker.wprp` and `MemoryUsageTrace.cmd` are copied to the deploy folder as sidecar files. Testers who receive a published build can run `MemoryUsageTrace.cmd` directly from that folder — no need to clone the repo or download the profile separately.
+
 ## 2. Heap snapshots (Exercise 2 Part B)
 
 User-mode heap allocations are only captured for processes that opt in via a per-image registry flag. **Set the flag before launching the process you want to trace.** For an app called `YourApp.exe`:

@@ -10,9 +10,9 @@ Each exercise runs independently. Sections whose required providers were not cap
 
 ## 1. Collecting a trace
 
-The easiest way is to use the WPR profile shipped alongside this sample.
+The easiest way is to use the WPR profile shipped alongside this sample. After `dotnet publish` (see [§4 below](#4-building-and-publishing)) the single-file `MemoryUsageChecker.exe` ships with `MemoryUsageChecker.wprp` and `MemoryUsageTrace.cmd` as sidecar files in the same folder, so a tester can collect a trace and analyze it without leaving the deploy folder.
 
-**One-click (recommended for new testers):** open an **elevated** `cmd.exe`, run `v2\MemoryUsageChecker\Profiles\MemoryUsageTrace.cmd`, pick **Start Tracing → MemoryUsageChecker → Start Now**, reproduce your workload, then press a key to stop. Output lands in `%SystemRoot%\Tracing\` as `MemoryUsage-Trace.etl` plus a `*-TraceInfo.txt` and `*-System.evtx` for bug reports.
+**One-click (recommended for new testers):** open an **elevated** `cmd.exe`, run `MemoryUsageTrace.cmd` (from the deploy folder next to `MemoryUsageChecker.exe`, or from `v2\MemoryUsageChecker\Profiles\` in the source tree), pick **Start Tracing → MemoryUsageChecker → Start Now**, reproduce your workload, then press a key to stop. Output lands in `%SystemRoot%\Tracing\` as `MemoryUsage-Trace.etl` plus a `*-TraceInfo.txt` and `*-System.evtx` for bug reports.
 
 **Manual:** from an **elevated** PowerShell or `cmd.exe`:
 
@@ -134,6 +134,15 @@ The result is a roughly 47 MB single executable at:
 
 ```
 v2\MemoryUsageChecker\bin\Release\net10.0\win-x64\publish\MemoryUsageChecker.exe
+```
+
+Two files sit alongside the `.exe` as deployable sidecars — they are NOT embedded into the single-file bundle so testers can edit them without re-publishing:
+
+```
+publish\
+  MemoryUsageChecker.exe       <-- single self-contained executable (~47 MB)
+  MemoryUsageChecker.wprp      <-- WPR profile (drop into wpr -start)
+  MemoryUsageTrace.cmd         <-- one-click collection helper
 ```
 
 (`win-arm64` lands in the corresponding `…\win-arm64\publish\` folder.) The `.exe` is self-extracting, requires no installed .NET runtime, and can be dropped onto any Windows 10/11 box for ad-hoc trace analysis. Trimming is intentionally disabled — `Microsoft.Windows.EventTracing` uses reflection to parse ETW payloads and trimming would remove types it needs at runtime.
