@@ -9,10 +9,27 @@ using System.Linq;
 
 namespace MemoryUsageChecker
 {
+    /// <summary>
+    /// Implements the WPT "Memory Footprint Optimization — Exercise 1"
+    /// analysis. Walks each <see cref="IResidentSetSnapshot"/> and emits:
+    /// (1) the MMList totals (Active / Standby / Modified / etc.) in MB,
+    /// (2) the top processes by Active resident pages, and
+    /// (3) the top kernel images by NonPaged (locked) pages — a common
+    /// driver-leak signature.
+    /// </summary>
+    /// <remarks>
+    /// Requires the <c>ResidentSet</c> data source in the ETL (captured by
+    /// the <c>ReferenceSet</c> profile in <c>MemoryUsageChecker.wprp</c>).
+    /// If absent, the exercise prints a single <c>[skipped]</c> line and
+    /// returns without raising.
+    /// </remarks>
     internal static class Exercise1_ResidentSet
     {
         private const long PageSizeBytes = 4096;
 
+        /// <summary>
+        /// Runs Exercise 1. See class summary for the analysis the method performs.
+        /// </summary>
         public static void Run(
             OutputWriter output,
             ITraceMetadata metadata,
@@ -20,10 +37,12 @@ namespace MemoryUsageChecker
             IPendingResult<IResidentSetDataSource> pendingResidentSet)
         {
             output.WriteHeader("=== Exercise 1: Resident Set ===");
+            Log.Info($"Exercise1: pendingResidentSet.HasResult={pendingResidentSet.HasResult}, snapshots={(pendingResidentSet.HasResult ? pendingResidentSet.Result.Snapshots.Count : 0)}");
 
             if (!pendingResidentSet.HasResult || pendingResidentSet.Result.Snapshots.Count == 0)
             {
                 output.WriteSkipped("[skipped - resident-set data not present in trace]");
+                Log.Info("Exercise1: skipped because resident-set data missing");
                 return;
             }
 
@@ -33,6 +52,7 @@ namespace MemoryUsageChecker
             {
                 System.DateTimeOffset wallClock = metadata.GetWallClock(snapshot.Timestamp);
                 output.WriteSubHeader($"Snapshot @ {wallClock} (trace-relative {snapshot.Timestamp.TotalSeconds:F3}s) - {snapshot.Pages.Count} pages");
+                Log.Info($"Exercise1: snapshot @ {wallClock:o} pages={snapshot.Pages.Count}");
 
                 WriteMmListSummary(output, snapshot.Pages);
                 output.WriteBlank();
@@ -42,6 +62,12 @@ namespace MemoryUsageChecker
             }
         }
 
+        /// <summary>
+        /// Emits the per-MMList totals (Active / Standby / Modified / Zeroed /
+        /// Free / Bad) in MB, sorted descending so the largest list is
+        /// rendered with the most prominent color. This shows the
+        /// system-wide memory pressure picture at a glance.
+        /// </summary>
         private static void WriteMmListSummary(OutputWriter output, IReadOnlyList<IResidentSetPage> pages)
         {
             output.WriteSubHeader("MMList totals (MB):");
@@ -58,6 +84,14 @@ namespace MemoryUsageChecker
             }
         }
 
+        /// <summary>
+        /// Emits the Top N processes by Active resident pages (i.e. RAM the
+        /// process is actively using). For each process, also breaks the
+        /// total down by <see cref="ResidentSetPageCategory"/> so the reader
+        /// can see whether the cost is image (code), private (heap/stack),
+        /// session, mapped file, etc. The summary ends with a <c>"+ N more"</c>
+        /// tail line so the truncation is honest.
+        /// </summary>
         private static void WriteTopProcessesByActive(OutputWriter output, IReadOnlyList<IResidentSetPage> pages)
         {
             output.WriteSubHeader($"Top {output.TopN} processes by Active working set (MB):");
@@ -89,7 +123,7 @@ namespace MemoryUsageChecker
             foreach (var row in topProcesses)
             {
                 rank++;
-                string line = $"  {row.Process.ImageName,-32} (pid {row.Process.Id,6})  {row.TotalMb,10:F2} MB";
+                string line = $"  {ImageFormatter.FormatProcess(row.Process)}  {row.TotalMb,10:F2} MB";
                 output.WriteRanked(rank, topProcesses.Count, line);
                 foreach (var cat in row.ByCategory.Take(output.TopK))
                 {
@@ -106,6 +140,13 @@ namespace MemoryUsageChecker
             }
         }
 
+        /// <summary>
+        /// Emits the Top N <see cref="ResidentSetPageCategory.DriverLockedSystemPage"/>
+        /// contributors grouped by image path. Pages in this category are
+        /// non-paged pool that a kernel-mode driver has locked in physical
+        /// RAM. A driver that dominates this list is a classic candidate
+        /// for a memory-footprint regression bug.
+        /// </summary>
         private static void WriteDriverLockedNonPaged(OutputWriter output, IReadOnlyList<IResidentSetPage> pages)
         {
             output.WriteSubHeader($"Top {output.TopN} driver-locked non-paged contributors (MB):");

@@ -104,6 +104,8 @@ The active symbol source is printed at the top of every run, so you can confirm 
 
 A timestamped result file `MemoryUsage_Result_yyyyMMdd_HHmm.txt` is written next to the working directory and mirrors the console output (without colors), ready to attach to a bug.
 
+A companion **diagnostic log** `MemoryUsage_Diag_yyyyMMdd_HHmm.log` is written next to the result file on every run. It captures the assembly version, the .NET runtime version, the OS description, the parsed command-line, the resolved symbol path, the `HasResult` flag and item count for every ETL data source, and per-phase `BEGIN`/`END (elapsed=Xs)` timings. If any exercise throws, the full exception type, message, stack trace, and up to five levels of inner-exception detail are appended. **Please attach this log together with the result file when reporting an issue** — it lets the maintainer reproduce the run state without re-collecting the trace.
+
 ## 3. Reading the output
 
 Lists across the analysis (top processes by working set, top drivers by pool usage, top stacks, etc.) are **always sorted descending by size** and color-coded by rank so the worst offender is the most visually prominent. Numeric columns are right-aligned for easy scanning, and each row includes a bug-report-quality identifier (process `pid`, full driver path, top stack frame `Image!Function`, pool 4-char tag, etc.) so you can paste any row directly into a report to Microsoft, an IHV, or an internal owner.

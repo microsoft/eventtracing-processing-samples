@@ -11,6 +11,27 @@ using System.Linq;
 
 namespace MemoryUsageChecker
 {
+    /// <summary>
+    /// Implements the WPT "Memory Footprint Optimization — Exercise 3"
+    /// analysis in two parts:
+    /// <list type="number">
+    ///   <item><b>Pool Allocations (Part A)</b> — groups outstanding pool
+    ///         allocations by the first non-kernel image in the allocation
+    ///         stack (the responsible driver), then by pool tag, then by
+    ///         allocation stack.</item>
+    ///   <item><b>Driver Code Footprint (Part B)</b> — joins the kernel-mode
+    ///         portion of the resident-set snapshot with loaded driver images
+    ///         to report how much physical RAM each driver's code pages
+    ///         occupy. A common signature for "bloated driver pulled in by
+    ///         vendor SKU".</item>
+    /// </list>
+    /// </summary>
+    /// <remarks>
+    /// Requires the <c>Pool</c> data source for Part A and the <c>ResidentSet</c>
+    /// data source for Part B (both captured by <c>MemoryUsageChecker.wprp</c>).
+    /// The kernel-image set in <see cref="KernelImages"/> is intentionally
+    /// small: any frame outside it is treated as the responsible driver.
+    /// </remarks>
     internal static class Exercise3_Pool
     {
         private const long NotableNonPagedBytes = 1L * 1024 * 1024; // 1 MB
@@ -31,6 +52,9 @@ namespace MemoryUsageChecker
             "hal.dll",
         };
 
+        /// <summary>
+        /// Runs Exercise 3. See class summary for the full analysis the method performs.
+        /// </summary>
         public static void Run(
             OutputWriter output,
             ITraceMetadata metadata,
@@ -39,12 +63,24 @@ namespace MemoryUsageChecker
             IPendingResult<IResidentSetDataSource> pendingResidentSet)
         {
             output.WriteHeader("=== Exercise 3: Pool ===");
+            Log.Info($"Exercise3: pendingPool.HasResult={pendingPool.HasResult}, intervals={(pendingPool.HasResult ? pendingPool.Result.Intervals.Count : 0)}");
+            Log.Info($"Exercise3: pendingResidentSet.HasResult={pendingResidentSet.HasResult}");
 
             RunPoolPart(output, pendingPool);
             output.WriteBlank();
-            RunDriverCodeFootprintPart(output, pendingResidentSet);
+            RunDriverCodeFootprintPart(output, pendingProcesses, pendingResidentSet);
         }
 
+        /// <summary>
+        /// Implements <b>Part A: Pool Allocations</b>. Groups every pool
+        /// allocation interval by the first non-kernel image in its
+        /// allocation stack (the responsible driver), ranks drivers by
+        /// outstanding non-paged bytes, and for the top drivers prints
+        /// per-driver top stacks plus a per-pool-tag breakdown for the #1
+        /// offender. Crosses the
+        /// <see cref="NotableNonPagedBytes"/> threshold renders red
+        /// regardless of rank to draw the eye to absolute leaks.
+        /// </summary>
         private static void RunPoolPart(OutputWriter output, IPendingResult<IPoolAllocationDataSource> pendingPool)
         {
             output.WriteSubHeader("--- Pool Allocations ---");
@@ -64,16 +100,19 @@ namespace MemoryUsageChecker
             // Allocations whose entire stack is kernel-only fall into "(kernel-internal)".
             var allPerDriver = intervals
                 .Where(i => i.Stack != null && i.Stack.Frames.Count > 0)
-                .GroupBy(GetResponsibleDriver)
+                .Select(i => new { Interval = i, DriverImage = GetResponsibleDriverImage(i) })
+                .GroupBy(x => x.DriverImage?.Path ?? x.DriverImage?.FileName ?? KernelInternalBucket)
                 .Select(g => new
                 {
-                    Driver = g.Key,
-                    NonPagedImpacting = g.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null).Sum(x => x.AllocationRange.Size.Bytes),
-                    NonPagedTransient = g.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp != null).Sum(x => x.AllocationRange.Size.Bytes),
-                    PagedImpacting = g.Where(x => x.PoolType.IsPaged && x.FreeTimestamp == null).Sum(x => x.AllocationRange.Size.Bytes),
-                    PagedTransient = g.Where(x => x.PoolType.IsPaged && x.FreeTimestamp != null).Sum(x => x.AllocationRange.Size.Bytes),
+                    DriverKey = g.Key,
+                    DriverImage = g.Select(x => x.DriverImage).FirstOrDefault(img => img != null),
+                    DriverLeaf = g.Select(x => x.DriverImage?.FileName).FirstOrDefault(n => !string.IsNullOrEmpty(n)) ?? g.Key,
+                    NonPagedImpacting = g.Where(x => !x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp == null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
+                    NonPagedTransient = g.Where(x => !x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp != null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
+                    PagedImpacting = g.Where(x => x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp == null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
+                    PagedTransient = g.Where(x => x.Interval.PoolType.IsPaged && x.Interval.FreeTimestamp != null).Sum(x => x.Interval.AllocationRange.Size.Bytes),
                     AllocCount = g.LongCount(),
-                    Intervals = g.ToList()
+                    Intervals = g.Select(x => x.Interval).ToList()
                 })
                 .OrderByDescending(x => x.NonPagedImpacting)
                 .ToList();
@@ -85,8 +124,9 @@ namespace MemoryUsageChecker
             foreach (var row in perDriver)
             {
                 rank++;
+                string driverLabel = ImageFormatter.FormatDriverShort(row.DriverImage, row.DriverLeaf);
                 string line =
-                    $"  {row.Driver,-28}  NP-Imp {row.NonPagedImpacting / 1024.0,9:F1}  NP-Tr {row.NonPagedTransient / 1024.0,9:F1}  " +
+                    $"  {driverLabel,-60}  NP-Imp {row.NonPagedImpacting / 1024.0,9:F1}  NP-Tr {row.NonPagedTransient / 1024.0,9:F1}  " +
                     $"P-Imp {row.PagedImpacting / 1024.0,9:F1}  P-Tr {row.PagedTransient / 1024.0,9:F1}  KB  ({row.AllocCount} allocs)";
                 if (row.NonPagedImpacting >= NotableNonPagedBytes)
                 {
@@ -110,7 +150,8 @@ namespace MemoryUsageChecker
             // Per top-driver: top-K Impacting and Transient stacks (NonPaged)
             foreach (var row in perDriver)
             {
-                output.WriteSubHeader($"Top {output.TopK} pool alloc stacks for {row.Driver} (NonPaged only)");
+                string driverLabel = ImageFormatter.FormatDriverShort(row.DriverImage, row.DriverLeaf);
+                output.WriteSubHeader($"Top {output.TopK} pool alloc stacks for {driverLabel} (NonPaged only)");
                 Exercise2_VirtualAllocHeap.WriteTopStacks(output, "Impacting",
                     row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
                                  .Select(x => (x.Stack, x.AllocationRange.Size.Bytes)));
@@ -124,7 +165,8 @@ namespace MemoryUsageChecker
             var topDriver = perDriver.FirstOrDefault();
             if (topDriver != null)
             {
-                output.WriteSubHeader($"Per-pool-tag breakdown for #1 driver {topDriver.Driver} (top {output.TopK})");
+                string topDriverLabel = ImageFormatter.FormatDriverShort(topDriver.DriverImage, topDriver.DriverLeaf);
+                output.WriteSubHeader($"Per-pool-tag breakdown for #1 driver {topDriverLabel} (top {output.TopK})");
                 var allTagBreakdown = topDriver.Intervals
                     .GroupBy(x => string.IsNullOrEmpty(x.Tag) ? "(no tag)" : x.Tag)
                     .Select(g => new
@@ -153,14 +195,23 @@ namespace MemoryUsageChecker
             }
         }
 
-        // Returns the file name of the first non-kernel image walked from the
-        // innermost frame outward. Falls back to KernelInternalBucket when every
-        // frame belongs to a Windows kernel image.
-        private static string GetResponsibleDriver(IPoolAllocationInterval interval)
+        /// <summary>
+        /// Returns the first non-kernel <see cref="Microsoft.Windows.EventTracing.Processes.IImage"/>
+        /// walked from the innermost frame outward on
+        /// <paramref name="interval"/>'s allocation stack. This is the
+        /// driver that actually requested the allocation:
+        /// <c>ExAllocatePool*</c> in frame[0] always belongs to a kernel
+        /// image (<see cref="KernelImages"/>); the first frame above it
+        /// outside that set is the caller. Returns <c>null</c> if every
+        /// frame is a kernel image — callers should bucket that case under
+        /// <see cref="KernelInternalBucket"/>.
+        /// </summary>
+        private static Microsoft.Windows.EventTracing.Processes.IImage GetResponsibleDriverImage(IPoolAllocationInterval interval)
         {
             foreach (var frame in interval.Stack.Frames)
             {
-                string image = frame.Image?.FileName;
+                var img = frame.Image;
+                string image = img?.FileName;
                 if (string.IsNullOrEmpty(image))
                 {
                     continue;
@@ -169,13 +220,27 @@ namespace MemoryUsageChecker
                 {
                     continue;
                 }
-                return image;
+                return img;
             }
-            return KernelInternalBucket;
+            return null;
         }
 
         // ---- Part B: Driver code footprint ----
-        private static void RunDriverCodeFootprintPart(OutputWriter output, IPendingResult<IResidentSetDataSource> pendingResidentSet)
+
+        /// <summary>
+        /// Implements <b>Part B: Driver Code Footprint</b>. Takes the
+        /// kernel-mode portion of the LATEST resident-set snapshot
+        /// (<see cref="ResidentSetPageCategory.NonProcessImagePage"/>),
+        /// joins it with the union of <see cref="IProcess.Images"/> across
+        /// every process so the leaf file name can be enriched with the
+        /// driver's friendly name and version, then ranks drivers by
+        /// resident code-page bytes. Crosses the
+        /// <see cref="NotableDriverCodeBytes"/> threshold renders red.
+        /// </summary>
+        private static void RunDriverCodeFootprintPart(
+            OutputWriter output,
+            IPendingResult<IProcessDataSource> pendingProcesses,
+            IPendingResult<IResidentSetDataSource> pendingResidentSet)
         {
             output.WriteSubHeader("--- Driver Code Footprint (File Backed Pages) ---");
 
@@ -183,6 +248,26 @@ namespace MemoryUsageChecker
             {
                 output.WriteSkipped("[skipped - resident-set data not present in trace]");
                 return;
+            }
+
+            // Build a one-shot path -> IImage lookup so we can enrich a driver
+            // row with FileDescription + FileVersion when the trace captured
+            // the image load (the Loader keyword in the .wprp).
+            Dictionary<string, Microsoft.Windows.EventTracing.Processes.IImage> imageByPath =
+                new Dictionary<string, Microsoft.Windows.EventTracing.Processes.IImage>(StringComparer.OrdinalIgnoreCase);
+            if (pendingProcesses.HasResult)
+            {
+                foreach (var p in pendingProcesses.Result.Processes)
+                {
+                    if (p.Images == null) continue;
+                    foreach (var img in p.Images)
+                    {
+                        string path = null;
+                        try { path = img.Path; } catch { }
+                        if (string.IsNullOrEmpty(path)) continue;
+                        if (!imageByPath.ContainsKey(path)) imageByPath[path] = img;
+                    }
+                }
             }
 
             // Pick latest snapshot for steady-state image footprint
@@ -204,6 +289,7 @@ namespace MemoryUsageChecker
                 {
                     Path = g.Key,
                     Leaf = System.IO.Path.GetFileName(g.Key),
+                    Image = imageByPath.TryGetValue(g.Key, out var img) ? img : null,
                     PageCount = g.LongCount(),
                     Bytes = g.LongCount() * PageSizeBytes,
                     Mb = (g.LongCount() * PageSizeBytes) / 1024.0 / 1024.0
@@ -224,7 +310,8 @@ namespace MemoryUsageChecker
             foreach (var row in displayed)
             {
                 rank++;
-                string line = $"  {row.Mb,8:F2} MB  {row.PageCount,7} pages  {row.Leaf,-28}  {row.Path}";
+                string identifier = ImageFormatter.FormatDriverRow(row.Image, row.Leaf, row.Path);
+                string line = $"  {row.Mb,8:F2} MB  {row.PageCount,7} pages  {identifier}";
                 if (row.Bytes >= NotableDriverCodeBytes)
                 {
                     output.WriteCritical(line);

@@ -10,10 +10,32 @@ using System.Linq;
 
 namespace MemoryUsageChecker
 {
+    /// <summary>
+    /// Implements the WPT "Memory Footprint Optimization — Exercise 2"
+    /// analysis in two parts:
+    /// <list type="number">
+    ///   <item><b>VirtualAlloc Commit Lifetimes</b> — splits each process'
+    ///         private commit into "Impacting" (still committed at trace stop)
+    ///         and "Transient" (decommitted before stop), then highlights the
+    ///         top commit stacks responsible for the impacting bytes.</item>
+    ///   <item><b>Heap Snapshots</b> — for each user-mode heap snapshot in
+    ///         the trace, reports the top processes by managed-heap size and
+    ///         the top allocation stacks within each.</item>
+    /// </list>
+    /// </summary>
+    /// <remarks>
+    /// Requires the <c>VirtualAlloc</c> and <c>Heap</c> data sources
+    /// (captured by the matching profiles in <c>MemoryUsageChecker.wprp</c>).
+    /// Stacks are best-effort: when symbols are unavailable they will show
+    /// <c>[no symbols]</c> per frame instead of failing the run.
+    /// </remarks>
     internal static class Exercise2_VirtualAllocHeap
     {
         private const long NotableImpactingBytes = 10L * 1024 * 1024; // 10 MB
 
+        /// <summary>
+        /// Runs Exercise 2. See class summary for the full analysis the method performs.
+        /// </summary>
         public static void Run(
             OutputWriter output,
             ITraceMetadata metadata,
@@ -22,12 +44,23 @@ namespace MemoryUsageChecker
             IPendingResult<IHeapSnapshotDataSource> pendingHeap)
         {
             output.WriteHeader("=== Exercise 2: VirtualAlloc + Heap ===");
+            Log.Info($"Exercise2: pendingCommit.HasResult={pendingCommit.HasResult}, lifetimes={(pendingCommit.HasResult ? pendingCommit.Result.CommitLifetimes.Count : 0)}");
+            Log.Info($"Exercise2: pendingHeap.HasResult={pendingHeap.HasResult}, snapshots={(pendingHeap.HasResult ? pendingHeap.Result.Snapshots.Count : 0)}");
 
             RunVirtualAllocPart(output, pendingCommit);
             output.WriteBlank();
             RunHeapPart(output, pendingHeap);
         }
 
+        /// <summary>
+        /// Implements <b>Part A: VirtualAlloc Commit Lifetimes</b>. Splits
+        /// every process's <see cref="CommitLifetimeType.VirtualMemory"/>
+        /// commits into "Impacting" (no <c>DecommitEvent</c> seen before
+        /// trace stop) and "Transient" (decommitted during the trace), ranks
+        /// the processes by Impacting size, then prints the top commit
+        /// stacks for both buckets so the reader can see the call sites
+        /// allocating the largest committed ranges.
+        /// </summary>
         private static void RunVirtualAllocPart(OutputWriter output, IPendingResult<ICommitDataSource> pendingCommit)
         {
             output.WriteSubHeader("--- VirtualAlloc Commit Lifetimes ---");
@@ -68,7 +101,7 @@ namespace MemoryUsageChecker
             foreach (var row in perProcess)
             {
                 rank++;
-                string line = $"  {row.Process.ImageName,-32} (pid {row.Process.Id,6})  Impacting {row.Impacting / 1048576.0,8:F2}  Transient {row.Transient / 1048576.0,8:F2}  Total {row.Total / 1048576.0,8:F2}  MB";
+                string line = $"  {ImageFormatter.FormatProcess(row.Process)}  Impacting {row.Impacting / 1048576.0,8:F2}  Transient {row.Transient / 1048576.0,8:F2}  Total {row.Total / 1048576.0,8:F2}  MB";
                 if (row.Impacting >= NotableImpactingBytes)
                 {
                     // Override the rank-based tier: threshold breach forces red.
@@ -90,7 +123,7 @@ namespace MemoryUsageChecker
 
             foreach (var row in perProcess)
             {
-                output.WriteSubHeader($"Top {output.TopK} commit stacks for {row.Process.ImageName} (pid {row.Process.Id})");
+                output.WriteSubHeader($"Top {output.TopK} commit stacks for {ImageFormatter.FormatProcessShort(row.Process)}");
 
                 WriteTopStacks(output, "Impacting", row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => (x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)));
                 WriteTopStacks(output, "Transient", row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => (x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)));
@@ -98,8 +131,18 @@ namespace MemoryUsageChecker
             }
         }
 
-        // ---- Part B: Heap snapshots (filled in Task 6) ----
+        // ---- Part B: Heap snapshots ----
 
+        /// <summary>
+        /// Implements <b>Part B: Heap Snapshots</b>. For each process, picks
+        /// the LATEST heap snapshot as the canonical "outstanding heap" view
+        /// at trace stop, ranks processes by outstanding bytes, and for each
+        /// top process prints the Top K allocation stacks on its largest
+        /// heap handle. Skipped (with guidance) when the trace contains no
+        /// heap data — heap tracing requires the per-process
+        /// <c>TracingFlags=1</c> registry key documented in WPT Exercise 2
+        /// Step 1.1.
+        /// </summary>
         private static void RunHeapPart(OutputWriter output, IPendingResult<IHeapSnapshotDataSource> pendingHeap)
         {
             output.WriteSubHeader("--- Heap Snapshots ---");
@@ -138,7 +181,7 @@ namespace MemoryUsageChecker
             {
                 rank++;
                 string line =
-                    $"  {row.Process.ImageName,-32} (pid {row.Process.Id,6})  " +
+                    $"  {ImageFormatter.FormatProcess(row.Process)}  " +
                     $"heaps {row.HeapCount,3}  allocations {row.AllocCount,8}  outstanding {row.OutstandingBytes / 1024.0,10:F2} KB";
                 output.WriteRanked(rank, perProcessSummary.Count, line);
             }
@@ -162,14 +205,21 @@ namespace MemoryUsageChecker
 
                 if (largestHeap == null) continue;
 
-                output.WriteSubHeader($"Top {output.TopK} alloc stacks on largest heap (handle 0x{largestHeap.Handle:X}) of {row.Process.ImageName} (pid {row.Process.Id})");
+                output.WriteSubHeader($"Top {output.TopK} alloc stacks on largest heap (handle 0x{largestHeap.Handle:X}) of {ImageFormatter.FormatProcessShort(row.Process)}");
                 WriteTopStacks(output, "Outstanding", largestHeap.Allocs.Select(a => (a.Stack, a.Size.Bytes)));
                 output.WriteBlank();
             }
         }
 
-        // ---- Shared stack-aggregation helper (used by Part A AND Task 6's Part B) ----
+        // ---- Shared stack-aggregation helpers (used by Part A AND Part B) ----
 
+        /// <summary>
+        /// Groups <paramref name="sized"/> by a 12-frame stack key, sums the
+        /// bytes per group, ranks descending, prints the Top K groups
+        /// (one bucket per stack, with the bucket size and one sample of
+        /// the stack), then a tail summary line. Overload used by the
+        /// VirtualAlloc path which provides <see cref="IStackSnapshot"/>s.
+        /// </summary>
         internal static void WriteTopStacks(OutputWriter output, string label, IEnumerable<(IStackSnapshot Stack, long SizeBytes)> sized)
         {
             var sizedList = sized.Where(x => x.Stack != null).ToList();
@@ -206,6 +256,12 @@ namespace MemoryUsageChecker
             }
         }
 
+        /// <summary>
+        /// Sibling overload for the heap path, which provides
+        /// <see cref="IThreadStack"/>s (no <see cref="IStackSnapshot"/>
+        /// available in the heap data source). Behavior is identical: group
+        /// by frame-list key, sum bytes, rank, print Top K + tail.
+        /// </summary>
         internal static void WriteTopStacks(OutputWriter output, string label, IEnumerable<(IThreadStack Stack, long SizeBytes)> sized)
         {
             var sizedList = sized.Where(x => x.Stack != null).ToList();
@@ -242,12 +298,24 @@ namespace MemoryUsageChecker
             }
         }
 
+        /// <summary>
+        /// Returns a stable string key built from up to the first 12 frames
+        /// of <paramref name="stack"/>. Used to bucket stacks that differ
+        /// only deep in the kernel/runtime — so two callers that share the
+        /// top 12 frames are treated as the same logical allocation site.
+        /// </summary>
         internal static string StackKey(IStackSnapshot stack)
         {
-            // Concatenate up to 12 frames' (image!function or RVA) into a stable key.
             return string.Join(" | ", stack.Frames.Take(12).Select(FormatFrame));
         }
 
+        /// <summary>
+        /// Formats a single stack frame as <c>image!function+0xOFFSET</c>
+        /// when symbols loaded, or <c>image!0xRVA [no symbols]</c> when
+        /// symbol resolution failed for that frame. Returns
+        /// <c>"[no value]"</c> when the frame has no value (e.g. tail
+        /// padding in a truncated stack).
+        /// </summary>
         internal static string FormatFrame(StackFrame frame)
         {
             if (!frame.HasValue) return "[no value]";
