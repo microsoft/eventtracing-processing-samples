@@ -197,9 +197,14 @@ echo   %etlFileName%
 echo   %traceInfoFileName%
 echo   %systemEventLogsFileName%
 echo.
-echo Analyze the trace with:
+echo Analyze the trace:
 echo.
-echo   MemoryUsageChecker.exe "%traceFilesOutputPath%\%etlFileName%"
+echo   * Easiest: double-click MemoryUsageChecker.exe in this folder. It will auto-pick
+echo     %etlFileName% (the trace just saved next to it) and start analyzing.
+echo.
+echo   * Or from a shell, with the path explicit:
+echo.
+echo       MemoryUsageChecker.exe "%traceFilesOutputPath%\%etlFileName%"
 echo.
 echo ######################################################################################
 goto End

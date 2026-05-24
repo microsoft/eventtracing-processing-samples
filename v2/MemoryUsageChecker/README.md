@@ -32,6 +32,8 @@ By default the trace files land in the same folder as `MemoryUsageTrace.cmd` its
 
 The script prints the list of files to share when collection finishes.
 
+**To analyze the trace you just collected, simply double-click `MemoryUsageChecker.exe` in the same folder** — it auto-discovers `MemoryUsage-Trace.etl` sitting next to it and starts analyzing. No shell required. See [§2](#2-running-the-sample) for the auto-discovery rules and command-line equivalents.
+
 ### 1.2 Heap snapshots (Exercise 2 Part B)
 
 User-mode heap allocations are only captured for processes that opt in via a per-image registry flag. **Set the flag before launching the process you want to trace.** For an app called `YourApp.exe`:
@@ -82,12 +84,14 @@ Capture with **Logging mode = File** and save the resulting `.etl` to disk.
 ## 2. Running the sample
 
 ```
-MemoryUsageChecker.exe <trace.etl> [--top N] [--symbols <path>] [--no-symbols]
+MemoryUsageChecker.exe [<trace.etl>] [--top N] [--symbols <path>] [--no-symbols]
 ```
+
+When `<trace.etl>` is omitted (e.g. when `MemoryUsageChecker.exe` is launched by **double-clicking** it in Explorer), the tool auto-selects the most recently modified `*.etl` file located in the **same folder as the .exe**, preferring `MemoryUsage-Trace.etl` (the canonical name produced by `MemoryUsageTrace.cmd`). The selected path is printed in cyan before processing starts. This makes the canonical one-folder workflow — collect with `MemoryUsageTrace.cmd`, analyze by double-clicking `MemoryUsageChecker.exe` — work without ever opening a shell.
 
 | Argument | Default | Description |
 |---|---|---|
-| `<trace.etl>` | (required) | Path to the ETL file. |
+| `<trace.etl>` | auto-discovered next to the .exe | Path to the ETL file. Omit to use the most recent `*.etl` sitting next to `MemoryUsageChecker.exe`. |
 | `--top N` | `10` | Caps the number of top entries displayed per category. |
 | `--symbols <path>` | (see below) | Override the symbol search path. Accepts any `symsrv`-compatible string, including `SRV*<cache>*<server>`. |
 | `--no-symbols` | (off) | Skip symbol resolution. Exercises 2 and 3 still run but stack frames show `[no symbols]`. |

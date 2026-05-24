@@ -49,6 +49,7 @@ namespace MemoryUsageChecker
                         Console.ForegroundColor = ConsoleColor.Red;
                         Console.Error.WriteLine("--top requires a positive integer.");
                         Console.ResetColor();
+                        WaitForKeyIfInteractive();
                         return 1;
                     }
                 }
@@ -70,21 +71,44 @@ namespace MemoryUsageChecker
                     Console.Error.WriteLine($"Unexpected argument: {a}");
                     Console.ResetColor();
                     PrintUsage();
+                    WaitForKeyIfInteractive();
                     return 1;
                 }
             }
 
             if (tracePath == null)
             {
-                PrintUsage();
-                return 1;
+                string autoExeDir;
+                string autoPath = TryAutoDiscoverTrace(out autoExeDir);
+                if (autoPath != null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine("No trace path specified. Auto-selected the most recent *.etl next to MemoryUsageChecker.exe:");
+                    Console.WriteLine($"  {autoPath}");
+                    Console.ResetColor();
+                    Console.WriteLine();
+                    tracePath = autoPath;
+                }
+                else
+                {
+                    PrintUsage();
+                    Console.Error.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Error.WriteLine($"No *.etl file was found next to MemoryUsageChecker.exe ({autoExeDir ?? "(exe folder unknown)"}).");
+                    Console.ResetColor();
+                    Console.Error.WriteLine("Tip: capture a trace with the bundled MemoryUsageTrace.cmd (elevated cmd.exe), then re-run by");
+                    Console.Error.WriteLine("     double-clicking MemoryUsageChecker.exe or by passing the ETL path explicitly.");
+                    WaitForKeyIfInteractive();
+                    return 1;
+                }
             }
 
             if (!File.Exists(tracePath))
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.Error.WriteLine("File does not exist! Please check the trace path again.");
+                Console.Error.WriteLine($"File does not exist: {tracePath}");
                 Console.ResetColor();
+                WaitForKeyIfInteractive();
                 return 1;
             }
 
@@ -148,6 +172,14 @@ namespace MemoryUsageChecker
                     trace = new TraceProcessorBuilder().WithSettings(settings).Build(tracePath);
                 }
 
+                // Block system sleep and display-off for the duration of the
+                // trace processing pass + symbol download + per-exercise
+                // analyzers. Symbol downloads against the public symbol server
+                // can take many minutes on a cold cache, which is well past
+                // typical idle-sleep timeouts, so without this an unattended
+                // run silently fails partway through. Cleared automatically
+                // when the using-block exits (success or exception).
+                using (PowerRequest.Create("MemoryUsageChecker: processing ETL trace and loading symbols"))
                 using (trace)
                 {
                     ITraceMetadata metadata = trace.UseMetadata();
@@ -335,10 +367,28 @@ namespace MemoryUsageChecker
             }
             using (Log.Scope("LoadSymbolsForConsoleAsync"))
             {
+                // Wrap Console.Out so the SDK's per-image progress lines
+                // (e.g. "45.2% (1053 of 2330; 1050 loaded)") are folded into
+                // a single in-place progress bar instead of one new console
+                // line per image. The interceptor passes all other output
+                // through unchanged. Complete() finalizes any pending bar
+                // with a newline so subsequent writes start on a clean line.
+                TextWriter savedConsoleOut = Console.Out;
+                bool stdoutRedirected = Console.IsOutputRedirected;
+                SymbolProgressConsoleWriter interceptor = new SymbolProgressConsoleWriter(savedConsoleOut, stdoutRedirected);
                 try
                 {
-                    pendingSymbols.Result.LoadSymbolsForConsoleAsync(SymCachePath.Automatic, symbolPath).GetAwaiter().GetResult();
-                    if (jsonReport != null) jsonReport.Symbols.Loaded = true;
+                    try
+                    {
+                        Console.SetOut(interceptor);
+                        pendingSymbols.Result.LoadSymbolsForConsoleAsync(SymCachePath.Automatic, symbolPath).GetAwaiter().GetResult();
+                        if (jsonReport != null) jsonReport.Symbols.Loaded = true;
+                    }
+                    finally
+                    {
+                        Console.SetOut(savedConsoleOut);
+                        interceptor.Complete();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -426,7 +476,85 @@ namespace MemoryUsageChecker
         /// <summary>Prints a one-line usage banner to stderr.</summary>
         private static void PrintUsage()
         {
-            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe <trace.etl> [--top N] [--symbols <path>] [--no-symbols]");
+            Console.Error.WriteLine("Usage: MemoryUsageChecker.exe [<trace.etl>] [--top N] [--symbols <path>] [--no-symbols]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("When <trace.etl> is omitted (e.g. when MemoryUsageChecker.exe is launched");
+            Console.Error.WriteLine("by double-clicking it in Explorer), the tool auto-selects the most recently");
+            Console.Error.WriteLine("modified *.etl file located in the same folder as the .exe, preferring");
+            Console.Error.WriteLine("MemoryUsage-Trace.etl (the canonical name produced by MemoryUsageTrace.cmd).");
+        }
+
+        /// <summary>
+        /// Locates the most recently modified <c>*.etl</c> in the folder
+        /// containing <c>MemoryUsageChecker.exe</c>. Prefers the canonical
+        /// <c>MemoryUsage-Trace.etl</c> name produced by the bundled
+        /// <c>MemoryUsageTrace.cmd</c> collection script so a tester who
+        /// just captured a fresh trace can double-click the .exe and have
+        /// it picked up automatically. Falls back to the newest <c>*.etl</c>
+        /// by <c>LastWriteTimeUtc</c> when the canonical name is missing,
+        /// so renamed / archived captures still work.
+        /// </summary>
+        /// <param name="searchedDir">
+        /// The directory that was inspected, returned to the caller so the
+        /// "no trace found" error message can identify exactly where the tool
+        /// looked. <c>null</c> when the .exe folder could not be resolved.
+        /// </param>
+        /// <returns>Absolute path of the selected ETL, or <c>null</c> when none was found.</returns>
+        /// <remarks>
+        /// We use <see cref="Environment.ProcessPath"/> (not
+        /// <see cref="AppContext.BaseDirectory"/>) because the project ships
+        /// as a self-contained single-file publish — <c>BaseDirectory</c>
+        /// points at the extraction temp folder, while <c>ProcessPath</c>
+        /// points at the actual on-disk .exe alongside the user's ETL.
+        /// </remarks>
+        private static string TryAutoDiscoverTrace(out string searchedDir)
+        {
+            searchedDir = null;
+            try
+            {
+                string exePath = Environment.ProcessPath;
+                if (string.IsNullOrEmpty(exePath)) return null;
+                string exeDir = Path.GetDirectoryName(exePath);
+                if (string.IsNullOrEmpty(exeDir) || !Directory.Exists(exeDir)) return null;
+                searchedDir = exeDir;
+
+                string preferred = Path.Combine(exeDir, "MemoryUsage-Trace.etl");
+                if (File.Exists(preferred)) return preferred;
+
+                FileInfo[] etls = new DirectoryInfo(exeDir).GetFiles("*.etl");
+                if (etls.Length == 0) return null;
+                Array.Sort(etls, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                return etls[0].FullName;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"Auto-discovery of *.etl in EXE folder failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Pauses with the standard "Press any key to exit..." prompt only
+        /// when there is a real interactive console attached. Used on the
+        /// early-exit error paths so that a user who double-clicked the
+        /// .exe (and therefore has no parent shell to hold the window open)
+        /// can actually read the error message before Windows closes the
+        /// console. Silently skipped when stdin is redirected (CI, batch
+        /// pipelines, etc.) so it never deadlocks unattended runs.
+        /// </summary>
+        private static void WaitForKeyIfInteractive()
+        {
+            try
+            {
+                if (Console.IsInputRedirected) return;
+            }
+            catch
+            {
+                return;
+            }
+            Console.WriteLine();
+            Console.WriteLine("Press any key to exit...");
+            try { _ = Console.ReadKey(); } catch (InvalidOperationException) { /* stdin redirected mid-flight; skip */ }
         }
     }
 }
