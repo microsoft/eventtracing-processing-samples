@@ -30,5 +30,29 @@
 			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
 		</Content>
+		<!--
+		Ship the project README next to MemoryUsageChecker.exe so the released
+		binary drop (zip / loose folder) is self-documenting for external
+		testers and IHVs who never see the source repo. The README is the
+		canonical source - linking the project copy avoids drift.
+		-->
+		<Content Include="README.md">
+			<Link>%(Filename)%(Extension)</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+			<ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+		</Content>
 	</ItemGroup>
+	<!--
+	Microsoft.Windows.EventTracing pulls in Microsoft.Windows.Xperfplugin.SymCredentialProvider,
+	which ships empty 'Catalog' and 'CredentialProviders' folders into every output that
+	references it. These folders are inert at runtime - they exist only as packaging stubs
+	for an internal symbol-credential helper that ships no managed bits via this path. Strip
+	them from the publish drop so the released directory contains only files an external user
+	actually needs: MemoryUsageChecker.exe, MemoryUsageChecker.wprp, MemoryUsageTrace.cmd, and
+	README.md.
+	-->
+	<Target Name="RemoveEmptyPublishStubs" AfterTargets="Publish">
+		<RemoveDir Directories="$(PublishDir)Catalog;$(PublishDir)CredentialProviders" />
+	</Target>
 </Project>

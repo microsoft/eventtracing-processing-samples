@@ -106,6 +106,8 @@ A timestamped result file `MemoryUsage_Result_yyyyMMdd_HHmm.txt` is written next
 
 A companion **diagnostic log** `MemoryUsage_Diag_yyyyMMdd_HHmm.log` is written next to the result file on every run. It captures the assembly version, the .NET runtime version, the OS description, the parsed command-line, the resolved symbol path, the `HasResult` flag and item count for every ETL data source, and per-phase `BEGIN`/`END (elapsed=Xs)` timings. If any exercise throws, the full exception type, message, stack trace, and up to five levels of inner-exception detail are appended. **Please attach this log together with the result file when reporting an issue** — it lets the maintainer reproduce the run state without re-collecting the trace.
 
+A companion **JSON sidecar** `MemoryUsage_Result_yyyyMMdd_HHmm.json` is also written next to the text result on every run. The JSON twin carries the same data the text file shows, in a stable, versioned, machine-readable shape that is ideal for **A/B comparison** between two captures (before vs after, device A vs device B).
+
 ## 3. Reading the output
 
 Lists across the analysis (top processes by working set, top drivers by pool usage, top stacks, etc.) are **always sorted descending by size** and color-coded by rank so the worst offender is the most visually prominent. Numeric columns are right-aligned for easy scanning, and each row includes a bug-report-quality identifier (process `pid`, full driver path, top stack frame `Image!Function`, pool 4-char tag, etc.) so you can paste any row directly into a report to Microsoft, an IHV, or an internal owner.
@@ -181,16 +183,17 @@ The result is a roughly 47 MB single executable at:
 v2\MemoryUsageChecker\bin\Release\net10.0\win-x64\publish\MemoryUsageChecker.exe
 ```
 
-Two files sit alongside the `.exe` as deployable sidecars — they are NOT embedded into the single-file bundle so testers can edit them without re-publishing:
+Three files sit alongside the `.exe` as deployable sidecars — they are NOT embedded into the single-file bundle so testers can edit them without re-publishing:
 
 ```
 publish\
   MemoryUsageChecker.exe       <-- single self-contained executable (~47 MB)
   MemoryUsageChecker.wprp      <-- WPR profile (drop into wpr -start)
   MemoryUsageTrace.cmd         <-- one-click collection helper
+  README.md                    <-- this document (for the external drop)
 ```
 
-(`win-arm64` lands in the corresponding `…\win-arm64\publish\` folder.) The `.exe` is self-extracting, requires no installed .NET runtime, and can be dropped onto any Windows 10/11 box for ad-hoc trace analysis. Trimming is intentionally disabled — `Microsoft.Windows.EventTracing` uses reflection to parse ETW payloads and trimming would remove types it needs at runtime.
+(`win-arm64` lands in the corresponding `…\win-arm64\publish\` folder with the same four files.) Those four files are everything an external user needs — you can zip the entire `publish\` directory and hand it to a tester, IHV, or internal engineer without any extra files. The `.exe` is self-extracting, requires no installed .NET runtime, and can be dropped onto any Windows 10/11 box for ad-hoc trace analysis. Trimming is intentionally disabled — `Microsoft.Windows.EventTracing` uses reflection to parse ETW payloads and trimming would remove types it needs at runtime.
 
 ## 5. References
 

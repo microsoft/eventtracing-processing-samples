@@ -107,6 +107,53 @@ namespace MemoryUsageChecker
         }
 
         /// <summary>
+        /// Builds the JSON identity block for a process: image name, pid,
+        /// friendly name (from <c>FileDescription</c>) and version string
+        /// (from <c>FileVersion</c>). Designed so two runs can be matched on
+        /// <c>ImageName</c> + <c>Version</c> (PID is run-local). Returns
+        /// <c>null</c> when the process itself is null.
+        /// </summary>
+        public static JsonReport.ProcessIdentity BuildProcessIdentity(IProcess process)
+        {
+            if (process == null) return null;
+            IImage image = FindMainImage(process);
+            string desc = Clean(SafeGet(() => image?.FileDescription));
+            if (string.IsNullOrEmpty(desc)) desc = Clean(SafeGet(() => image?.ProductName));
+            string ver = Clean(SafeGet(() => image?.FileVersion));
+            if (string.IsNullOrEmpty(ver)) ver = Clean(SafeGet(() => image?.ProductVersion));
+            return new JsonReport.ProcessIdentity
+            {
+                ImageName = string.IsNullOrEmpty(process.ImageName) ? "(unknown)" : process.ImageName,
+                Pid = (int)process.Id,
+                FriendlyName = string.IsNullOrEmpty(desc) ? null : desc,
+                Version = string.IsNullOrEmpty(ver) ? null : ver
+            };
+        }
+
+        /// <summary>
+        /// Builds the JSON identity block for a driver / image: file name,
+        /// path, friendly name and version. Falls back to the supplied leaf
+        /// / path when the SDK image object is null or doesn't expose those
+        /// properties.
+        /// </summary>
+        public static JsonReport.DriverIdentity BuildDriverIdentity(IImage image, string fallbackLeaf, string fallbackPath)
+        {
+            string leaf = SafeGet(() => image?.FileName) ?? fallbackLeaf ?? "(unknown)";
+            string path = SafeGet(() => image?.Path) ?? fallbackPath;
+            string desc = Clean(SafeGet(() => image?.FileDescription));
+            if (string.IsNullOrEmpty(desc)) desc = Clean(SafeGet(() => image?.ProductName));
+            string ver = Clean(SafeGet(() => image?.FileVersion));
+            if (string.IsNullOrEmpty(ver)) ver = Clean(SafeGet(() => image?.ProductVersion));
+            return new JsonReport.DriverIdentity
+            {
+                FileName = leaf,
+                Path = string.IsNullOrEmpty(path) ? null : path,
+                FriendlyName = string.IsNullOrEmpty(desc) ? null : desc,
+                Version = string.IsNullOrEmpty(ver) ? null : ver
+            };
+        }
+
+        /// <summary>
         /// Picks the loaded image whose file name matches the process's
         /// primary image name (e.g. <c>msedge.exe</c> inside the
         /// <c>msedge.exe</c> process). Returns <c>null</c> if no match is
@@ -182,6 +229,17 @@ namespace MemoryUsageChecker
 
             return parts.Count == 0 ? "(OS info not available in trace metadata)" : string.Join(" / ", parts);
         }
+
+        /// <summary>
+        /// Public wrapper around the reflection-based property reader used by
+        /// <see cref="FormatOsHeader"/>. Lets <c>Program.cs</c> pick out
+        /// individual OS fields (<c>OSVersion</c>, <c>OSBuildLab</c>,
+        /// <c>Architecture</c>, <c>MachineName</c>) for the JSON sidecar
+        /// without duplicating the SDK-version-tolerant reflection logic.
+        /// Returns <c>null</c> when the property is missing, the value is
+        /// null, the value is empty, or the read throws.
+        /// </summary>
+        public static string SafeReadProperty(object obj, string propName) => FirstNonEmpty(obj, propName);
 
         // ---- internals --------------------------------------------------
 

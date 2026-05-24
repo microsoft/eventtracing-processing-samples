@@ -60,15 +60,23 @@ namespace MemoryUsageChecker
             ITraceMetadata metadata,
             IPendingResult<IProcessDataSource> pendingProcesses,
             IPendingResult<IPoolAllocationDataSource> pendingPool,
-            IPendingResult<IResidentSetDataSource> pendingResidentSet)
+            IPendingResult<IResidentSetDataSource> pendingResidentSet,
+            JsonReport jsonReport = null)
         {
             output.WriteHeader("=== Exercise 3: Pool ===");
             Log.Info($"Exercise3: pendingPool.HasResult={pendingPool.HasResult}, intervals={(pendingPool.HasResult ? pendingPool.Result.Intervals.Count : 0)}");
             Log.Info($"Exercise3: pendingResidentSet.HasResult={pendingResidentSet.HasResult}");
 
-            RunPoolPart(output, pendingPool);
+            JsonReport.Exercise3Section jsonSection = null;
+            if (jsonReport != null)
+            {
+                jsonSection = new JsonReport.Exercise3Section();
+                jsonReport.Exercise3Pool = jsonSection;
+            }
+
+            RunPoolPart(output, pendingPool, jsonSection);
             output.WriteBlank();
-            RunDriverCodeFootprintPart(output, pendingProcesses, pendingResidentSet);
+            RunDriverCodeFootprintPart(output, metadata, pendingProcesses, pendingResidentSet, jsonSection);
         }
 
         /// <summary>
@@ -81,7 +89,7 @@ namespace MemoryUsageChecker
         /// <see cref="NotableNonPagedBytes"/> threshold renders red
         /// regardless of rank to draw the eye to absolute leaks.
         /// </summary>
-        private static void RunPoolPart(OutputWriter output, IPendingResult<IPoolAllocationDataSource> pendingPool)
+        private static void RunPoolPart(OutputWriter output, IPendingResult<IPoolAllocationDataSource> pendingPool, JsonReport.Exercise3Section jsonSection)
         {
             output.WriteSubHeader("--- Pool Allocations ---");
 
@@ -119,6 +127,13 @@ namespace MemoryUsageChecker
 
             var perDriver = allPerDriver.Take(output.TopN).ToList();
 
+            JsonReport.Exercise3PoolAllocations jsonPool = null;
+            if (jsonSection != null)
+            {
+                jsonPool = new JsonReport.Exercise3PoolAllocations();
+                jsonSection.PoolAllocations = jsonPool;
+            }
+
             output.WriteSubHeader($"Top {output.TopN} drivers by NonPaged Impacting size (KB):");
             int rank = 0;
             foreach (var row in perDriver)
@@ -137,13 +152,45 @@ namespace MemoryUsageChecker
                 {
                     output.WriteRanked(rank, perDriver.Count, line);
                 }
+
+                if (jsonPool != null)
+                {
+                    jsonPool.TopDriversByNonPagedImpactingBytes.Add(new JsonReport.RankedDriverPool
+                    {
+                        Rank = rank,
+                        Driver = ImageFormatter.BuildDriverIdentity(row.DriverImage, row.DriverLeaf, row.DriverKey),
+                        NonPagedImpactingBytes = row.NonPagedImpacting,
+                        NonPagedTransientBytes = row.NonPagedTransient,
+                        PagedImpactingBytes = row.PagedImpacting,
+                        PagedTransientBytes = row.PagedTransient,
+                        AllocationCount = row.AllocCount,
+                        TopImpactingStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
+                            row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp == null)
+                                         .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
+                            output.TopK),
+                        TopTransientStacks = Exercise2_VirtualAllocHeap.BuildRankedStacks(
+                            row.Intervals.Where(x => !x.PoolType.IsPaged && x.FreeTimestamp != null)
+                                         .Select(x => ((IStackSnapshot)x.Stack, x.AllocationRange.Size.Bytes)),
+                            output.TopK)
+                    });
+                }
             }
             // Tail summary for drivers
             if (allPerDriver.Count > perDriver.Count)
             {
                 int tailCount = allPerDriver.Count - perDriver.Count;
-                double tailKb = allPerDriver.Skip(perDriver.Count).Sum(x => x.NonPagedImpacting) / 1024.0;
+                long tailBytes = allPerDriver.Skip(perDriver.Count).Sum(x => x.NonPagedImpacting);
+                double tailKb = tailBytes / 1024.0;
                 output.WriteTail($"  + {tailCount} more drivers totaling {tailKb:F1} KB NP-Imp");
+                if (jsonPool != null)
+                {
+                    jsonPool.TailDrivers = new JsonReport.TailSummary
+                    {
+                        Count = tailCount,
+                        Bytes = tailBytes,
+                        Megabytes = tailBytes / 1048576.0
+                    };
+                }
             }
             output.WriteBlank();
 
@@ -185,12 +232,29 @@ namespace MemoryUsageChecker
                 {
                     tagRank++;
                     output.WriteRanked(tagRank, tagBreakdown.Count, $"  tag {t.Tag,-8}  NP-Imp {t.NpImp / 1024.0,9:F1} KB  ({t.Count} allocs)");
+                    jsonPool?.TopDriverTagBreakdown.Add(new JsonReport.RankedTag
+                    {
+                        Rank = tagRank,
+                        Tag = t.Tag,
+                        NonPagedImpactingBytes = t.NpImp,
+                        AllocationCount = t.Count
+                    });
                 }
                 if (allTagBreakdown.Count > tagBreakdown.Count)
                 {
                     int tailCount = allTagBreakdown.Count - tagBreakdown.Count;
-                    double tailKb = allTagBreakdown.Skip(tagBreakdown.Count).Sum(x => x.NpImp) / 1024.0;
+                    long tailBytes = allTagBreakdown.Skip(tagBreakdown.Count).Sum(x => x.NpImp);
+                    double tailKb = tailBytes / 1024.0;
                     output.WriteTail($"  + {tailCount} more tags totaling {tailKb:F1} KB NP-Imp");
+                    if (jsonPool != null)
+                    {
+                        jsonPool.TailTagBreakdown = new JsonReport.TailSummary
+                        {
+                            Count = tailCount,
+                            Bytes = tailBytes,
+                            Megabytes = tailBytes / 1048576.0
+                        };
+                    }
                 }
             }
         }
@@ -239,8 +303,10 @@ namespace MemoryUsageChecker
         /// </summary>
         private static void RunDriverCodeFootprintPart(
             OutputWriter output,
+            ITraceMetadata metadata,
             IPendingResult<IProcessDataSource> pendingProcesses,
-            IPendingResult<IResidentSetDataSource> pendingResidentSet)
+            IPendingResult<IResidentSetDataSource> pendingResidentSet,
+            JsonReport.Exercise3Section jsonSection)
         {
             output.WriteSubHeader("--- Driver Code Footprint (File Backed Pages) ---");
 
@@ -294,7 +360,7 @@ namespace MemoryUsageChecker
                     Bytes = g.LongCount() * PageSizeBytes,
                     Mb = (g.LongCount() * PageSizeBytes) / 1024.0 / 1024.0
                 })
-                .OrderByDescending(x => x.Mb)
+                .OrderByDescending(x => x.Bytes)
                 .ToList();
 
             var displayed = allByDriver.Take(output.TopN).ToList();
@@ -303,6 +369,19 @@ namespace MemoryUsageChecker
             {
                 output.WriteFinding("(no driver code pages found in the resident set)");
                 return;
+            }
+
+            JsonReport.Exercise3DriverCodeFootprint jsonFootprint = null;
+            if (jsonSection != null)
+            {
+                System.DateTimeOffset snapshotWall;
+                try { snapshotWall = metadata.GetWallClock(snapshot.Timestamp); }
+                catch { snapshotWall = default; }
+                jsonFootprint = new JsonReport.Exercise3DriverCodeFootprint
+                {
+                    SnapshotTimestampUtc = snapshotWall == default ? (DateTime?)null : snapshotWall.UtcDateTime
+                };
+                jsonSection.DriverCodeFootprint = jsonFootprint;
             }
 
             output.WriteSubHeader($"Top {output.TopN} drivers by code resident footprint (MB):");
@@ -320,14 +399,31 @@ namespace MemoryUsageChecker
                 {
                     output.WriteRanked(rank, displayed.Count, line);
                 }
+
+                jsonFootprint?.TopDriversByResidentBytes.Add(new JsonReport.RankedDriverFootprint
+                {
+                    Rank = rank,
+                    Driver = ImageFormatter.BuildDriverIdentity(row.Image, row.Leaf, row.Path),
+                    ResidentBytes = row.Bytes
+                });
             }
 
             // Tail summary
             if (allByDriver.Count > displayed.Count)
             {
                 int tailCount = allByDriver.Count - displayed.Count;
-                double tailMb = allByDriver.Skip(displayed.Count).Sum(x => x.Mb);
+                long tailBytes = allByDriver.Skip(displayed.Count).Sum(x => x.Bytes);
+                double tailMb = tailBytes / 1048576.0;
                 output.WriteTail($"  + {tailCount} more drivers totaling {tailMb:F2} MB");
+                if (jsonFootprint != null)
+                {
+                    jsonFootprint.TailDrivers = new JsonReport.TailSummary
+                    {
+                        Count = tailCount,
+                        Bytes = tailBytes,
+                        Megabytes = tailMb
+                    };
+                }
             }
         }
     }

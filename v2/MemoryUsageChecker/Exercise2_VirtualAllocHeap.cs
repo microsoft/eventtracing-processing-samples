@@ -41,15 +41,23 @@ namespace MemoryUsageChecker
             ITraceMetadata metadata,
             IPendingResult<IProcessDataSource> pendingProcesses,
             IPendingResult<ICommitDataSource> pendingCommit,
-            IPendingResult<IHeapSnapshotDataSource> pendingHeap)
+            IPendingResult<IHeapSnapshotDataSource> pendingHeap,
+            JsonReport jsonReport = null)
         {
             output.WriteHeader("=== Exercise 2: VirtualAlloc + Heap ===");
             Log.Info($"Exercise2: pendingCommit.HasResult={pendingCommit.HasResult}, lifetimes={(pendingCommit.HasResult ? pendingCommit.Result.CommitLifetimes.Count : 0)}");
             Log.Info($"Exercise2: pendingHeap.HasResult={pendingHeap.HasResult}, snapshots={(pendingHeap.HasResult ? pendingHeap.Result.Snapshots.Count : 0)}");
 
-            RunVirtualAllocPart(output, pendingCommit);
+            JsonReport.Exercise2Section jsonSection = null;
+            if (jsonReport != null)
+            {
+                jsonSection = new JsonReport.Exercise2Section();
+                jsonReport.Exercise2VirtualAllocHeap = jsonSection;
+            }
+
+            RunVirtualAllocPart(output, pendingCommit, jsonSection);
             output.WriteBlank();
-            RunHeapPart(output, pendingHeap);
+            RunHeapPart(output, pendingHeap, jsonSection);
         }
 
         /// <summary>
@@ -61,7 +69,7 @@ namespace MemoryUsageChecker
         /// stacks for both buckets so the reader can see the call sites
         /// allocating the largest committed ranges.
         /// </summary>
-        private static void RunVirtualAllocPart(OutputWriter output, IPendingResult<ICommitDataSource> pendingCommit)
+        private static void RunVirtualAllocPart(OutputWriter output, IPendingResult<ICommitDataSource> pendingCommit, JsonReport.Exercise2Section jsonSection)
         {
             output.WriteSubHeader("--- VirtualAlloc Commit Lifetimes ---");
 
@@ -96,6 +104,13 @@ namespace MemoryUsageChecker
 
             var perProcess = allPerProcess.Take(output.TopN).ToList();
 
+            JsonReport.Exercise2VirtualAlloc jsonVa = null;
+            if (jsonSection != null)
+            {
+                jsonVa = new JsonReport.Exercise2VirtualAlloc();
+                jsonSection.VirtualAlloc = jsonVa;
+            }
+
             output.WriteSubHeader($"Top {output.TopN} processes by Impacting commit size (MB):");
             int rank = 0;
             foreach (var row in perProcess)
@@ -111,13 +126,37 @@ namespace MemoryUsageChecker
                 {
                     output.WriteRanked(rank, perProcess.Count, line);
                 }
+
+                if (jsonVa != null)
+                {
+                    jsonVa.TopProcessesByImpactingBytes.Add(new JsonReport.RankedProcessVirtualAlloc
+                    {
+                        Rank = rank,
+                        Process = ImageFormatter.BuildProcessIdentity(row.Process),
+                        ImpactingBytes = row.Impacting,
+                        TransientBytes = row.Transient,
+                        TotalBytes = row.Total,
+                        TopImpactingStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp == null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK),
+                        TopTransientStacks = BuildRankedStacks(row.Lifetimes.Where(x => x.DecommitEvent?.Timestamp != null).Select(x => ((IStackSnapshot)x.CommitEvent?.Stack, x.AddressRange.Size.Bytes)), output.TopK)
+                    });
+                }
             }
             // Tail summary
             if (allPerProcess.Count > perProcess.Count)
             {
                 int tailCount = allPerProcess.Count - perProcess.Count;
-                double tailMb = allPerProcess.Skip(perProcess.Count).Sum(x => x.Impacting) / 1048576.0;
+                long tailBytes = allPerProcess.Skip(perProcess.Count).Sum(x => x.Impacting);
+                double tailMb = tailBytes / 1048576.0;
                 output.WriteTail($"  + {tailCount} more processes totaling {tailMb:F2} MB Impacting");
+                if (jsonVa != null)
+                {
+                    jsonVa.TailProcesses = new JsonReport.TailSummary
+                    {
+                        Count = tailCount,
+                        Bytes = tailBytes,
+                        Megabytes = tailMb
+                    };
+                }
             }
             output.WriteBlank();
 
@@ -143,7 +182,7 @@ namespace MemoryUsageChecker
         /// <c>TracingFlags=1</c> registry key documented in WPT Exercise 2
         /// Step 1.1.
         /// </summary>
-        private static void RunHeapPart(OutputWriter output, IPendingResult<IHeapSnapshotDataSource> pendingHeap)
+        private static void RunHeapPart(OutputWriter output, IPendingResult<IHeapSnapshotDataSource> pendingHeap, JsonReport.Exercise2Section jsonSection)
         {
             output.WriteSubHeader("--- Heap Snapshots ---");
 
@@ -175,6 +214,13 @@ namespace MemoryUsageChecker
 
             var perProcessSummary = allPerProcessSummary.Take(output.TopN).ToList();
 
+            JsonReport.Exercise2Heap jsonHeap = null;
+            if (jsonSection != null)
+            {
+                jsonHeap = new JsonReport.Exercise2Heap();
+                jsonSection.Heap = jsonHeap;
+            }
+
             output.WriteSubHeader($"Top {output.TopN} processes by outstanding heap size (KB):");
             int rank = 0;
             foreach (var row in perProcessSummary)
@@ -184,13 +230,46 @@ namespace MemoryUsageChecker
                     $"  {ImageFormatter.FormatProcess(row.Process)}  " +
                     $"heaps {row.HeapCount,3}  allocations {row.AllocCount,8}  outstanding {row.OutstandingBytes / 1024.0,10:F2} KB";
                 output.WriteRanked(rank, perProcessSummary.Count, line);
+
+                // Largest heap handle for this process by outstanding bytes
+                var largestHeap = row.Snapshot.Allocations
+                    .GroupBy(a => a.HeapHandle)
+                    .Select(g => new { Handle = g.Key, Bytes = g.Sum(a => a.Size.Bytes), Allocs = g.ToList() })
+                    .OrderByDescending(g => g.Bytes)
+                    .FirstOrDefault();
+
+                if (jsonHeap != null)
+                {
+                    jsonHeap.TopProcessesByOutstandingBytes.Add(new JsonReport.RankedProcessHeap
+                    {
+                        Rank = rank,
+                        Process = ImageFormatter.BuildProcessIdentity(row.Process),
+                        HeapCount = row.HeapCount,
+                        AllocationCount = row.AllocCount,
+                        OutstandingBytes = row.OutstandingBytes,
+                        LargestHeapHandle = largestHeap != null ? $"0x{largestHeap.Handle:X}" : null,
+                        TopAllocationStacks = largestHeap != null
+                            ? BuildRankedStacksFromThreadStacks(largestHeap.Allocs.Select(a => (a.Stack, a.Size.Bytes)), output.TopK)
+                            : new List<JsonReport.RankedStack>()
+                    });
+                }
             }
             // Tail summary
             if (allPerProcessSummary.Count > perProcessSummary.Count)
             {
                 int tailCount = allPerProcessSummary.Count - perProcessSummary.Count;
-                double tailKb = allPerProcessSummary.Skip(perProcessSummary.Count).Sum(x => x.OutstandingBytes) / 1024.0;
+                long tailBytes = allPerProcessSummary.Skip(perProcessSummary.Count).Sum(x => x.OutstandingBytes);
+                double tailKb = tailBytes / 1024.0;
                 output.WriteTail($"  + {tailCount} more processes totaling {tailKb:F2} KB outstanding");
+                if (jsonHeap != null)
+                {
+                    jsonHeap.TailProcesses = new JsonReport.TailSummary
+                    {
+                        Count = tailCount,
+                        Bytes = tailBytes,
+                        Megabytes = tailBytes / 1048576.0
+                    };
+                }
             }
             output.WriteBlank();
 
@@ -326,6 +405,69 @@ namespace MemoryUsageChecker
                 return $"{image}!{frame.Symbol.FunctionName}+0x{off:X}";
             }
             return $"{image}!0x{frame.RelativeVirtualAddress.Value:X} [no symbols]";
+        }
+
+        /// <summary>
+        /// JSON-side sibling of <see cref="WriteTopStacks(OutputWriter, string, IEnumerable{ValueTuple{IStackSnapshot, long}})"/>:
+        /// groups <paramref name="sized"/> by the same 12-frame stack key,
+        /// sums bytes per group, ranks descending, and returns the Top K
+        /// buckets as <see cref="JsonReport.RankedStack"/> objects with raw
+        /// byte totals and the sample stack's first 12 frames. Returns an
+        /// empty list when no stacks are available.
+        /// </summary>
+        internal static List<JsonReport.RankedStack> BuildRankedStacks(IEnumerable<(IStackSnapshot Stack, long SizeBytes)> sized, int topK)
+        {
+            var sizedList = sized.Where(x => x.Stack != null).ToList();
+            var allGroups = sizedList
+                .GroupBy(x => StackKey(x.Stack))
+                .Select(g => new { Key = g.Key, TotalBytes = g.Sum(x => x.SizeBytes), AllocationCount = (long)g.Count(), Sample = g.First().Stack })
+                .OrderByDescending(x => x.TotalBytes)
+                .ToList();
+
+            var result = new List<JsonReport.RankedStack>();
+            int rank = 0;
+            foreach (var grp in allGroups.Take(topK))
+            {
+                rank++;
+                result.Add(new JsonReport.RankedStack
+                {
+                    Rank = rank,
+                    TotalBytes = grp.TotalBytes,
+                    AllocationCount = grp.AllocationCount,
+                    Frames = grp.Sample.Frames.Take(12).Select(FormatFrame).ToList()
+                });
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Sibling of <see cref="BuildRankedStacks(IEnumerable{ValueTuple{IStackSnapshot, long}}, int)"/>
+        /// for the heap path, which provides <see cref="IThreadStack"/>s
+        /// instead of <see cref="IStackSnapshot"/>s.
+        /// </summary>
+        internal static List<JsonReport.RankedStack> BuildRankedStacksFromThreadStacks(IEnumerable<(IThreadStack Stack, long SizeBytes)> sized, int topK)
+        {
+            var sizedList = sized.Where(x => x.Stack != null).ToList();
+            var allGroups = sizedList
+                .GroupBy(x => string.Join(" | ", x.Stack.Frames.Take(12).Select(FormatFrame)))
+                .Select(g => new { Key = g.Key, TotalBytes = g.Sum(x => x.SizeBytes), AllocationCount = (long)g.Count(), Sample = g.First().Stack })
+                .OrderByDescending(x => x.TotalBytes)
+                .ToList();
+
+            var result = new List<JsonReport.RankedStack>();
+            int rank = 0;
+            foreach (var grp in allGroups.Take(topK))
+            {
+                rank++;
+                result.Add(new JsonReport.RankedStack
+                {
+                    Rank = rank,
+                    TotalBytes = grp.TotalBytes,
+                    AllocationCount = grp.AllocationCount,
+                    Frames = grp.Sample.Frames.Take(12).Select(FormatFrame).ToList()
+                });
+            }
+            return result;
         }
     }
 }

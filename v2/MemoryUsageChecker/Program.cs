@@ -91,6 +91,11 @@ namespace MemoryUsageChecker
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmm");
             string resultPath = Path.GetFullPath($"MemoryUsage_Result_{timestamp}.txt");
             string logPath = Path.GetFullPath($"MemoryUsage_Diag_{timestamp}.log");
+            // The JSON sidecar is always produced — it carries the same data
+            // as the text result in a stable, versioned, machine-readable
+            // shape so two captures can be A/B compared by AI / scripts
+            // without re-parsing colored text or re-opening the raw ETL.
+            string jsonPath = Path.GetFullPath($"MemoryUsage_Result_{timestamp}.json");
 
             // Open the diagnostic log FIRST so even a failure inside the
             // OutputWriter constructor or TraceProcessorBuilder lands in the log.
@@ -115,6 +120,21 @@ namespace MemoryUsageChecker
             }
             Log.Info($"Result file      : {resultPath}");
             Log.Info($"Diagnostic log   : {logPath}");
+            Log.Info($"JSON sidecar     : {jsonPath}");
+
+            // Build the JSON report alongside the text output so AI / scripts
+            // can A/B-compare two runs (before vs after, device A vs device B)
+            // without re-parsing color-coded text or re-opening the raw ETL.
+            // See JsonReport.cs for the schema.
+            JsonReport jsonReport = new JsonReport
+            {
+                Tool = new JsonReport.ToolInfo
+                {
+                    Version = typeof(Program).Assembly.GetName().Version?.ToString(),
+                    Runtime = RuntimeInformation.FrameworkDescription,
+                    HostOs = $"{RuntimeInformation.OSDescription} ({RuntimeInformation.OSArchitecture})"
+                }
+            };
 
             int exitCode;
             try
@@ -155,25 +175,46 @@ namespace MemoryUsageChecker
                     Log.Info($"DataSource Pool         : HasResult={pendingPool.HasResult}, intervals={(pendingPool.HasResult ? pendingPool.Result.Intervals.Count : 0)}");
                     Log.Info($"DataSource Symbols      : HasResult={pendingSymbols.HasResult}");
 
+                    PopulateReportMetadata(jsonReport, tracePath, metadata, systemMetadata,
+                        pendingProcesses, pendingResidentSet, pendingCommit, pendingHeap, pendingPool, pendingSymbols);
+
                     output.WriteHeader($"Trace Path:\t{tracePath}");
                     output.WriteHeader($"Trace Start Time:\t{metadata.StartTime}");
                     output.WriteHeader($"Trace Stop Time:\t{metadata.StopTime}");
                     output.WriteHeader($"OS / System:\t{ImageFormatter.FormatOsHeader(metadata, systemMetadata)}");
                     output.WriteHeader($"Result File:\t{resultPath}");
                     output.WriteHeader($"Diagnostic Log:\t{logPath}");
+                    output.WriteHeader($"JSON Sidecar:\t{jsonPath}");
                     output.WriteBlank();
 
-                    LoadSymbols(output, pendingSymbols, symbolsOverride, noSymbols);
+                    LoadSymbols(output, pendingSymbols, symbolsOverride, noSymbols, jsonReport);
                     output.WriteBlank();
 
-                    RunExercise(output, "Exercise 1", () => Exercise1_ResidentSet.Run(output, metadata, pendingProcesses, pendingResidentSet));
+                    RunExercise(output, "Exercise 1", () => Exercise1_ResidentSet.Run(output, metadata, pendingProcesses, pendingResidentSet, jsonReport));
                     output.WriteBlank();
 
-                    RunExercise(output, "Exercise 2", () => Exercise2_VirtualAllocHeap.Run(output, metadata, pendingProcesses, pendingCommit, pendingHeap));
+                    RunExercise(output, "Exercise 2", () => Exercise2_VirtualAllocHeap.Run(output, metadata, pendingProcesses, pendingCommit, pendingHeap, jsonReport));
                     output.WriteBlank();
 
-                    RunExercise(output, "Exercise 3", () => Exercise3_Pool.Run(output, metadata, pendingProcesses, pendingPool, pendingResidentSet));
+                    RunExercise(output, "Exercise 3", () => Exercise3_Pool.Run(output, metadata, pendingProcesses, pendingPool, pendingResidentSet, jsonReport));
                     output.WriteBlank();
+                }
+
+                // Persist the JSON sidecar AFTER the trace has been disposed
+                // so file handles for the ETL are released first.
+                using (Log.Scope("WriteJsonReport"))
+                {
+                    try
+                    {
+                        JsonReportWriter.Save(jsonReport, jsonPath);
+                        output.WriteInfo($"JSON sidecar written: {jsonPath}");
+                        Log.Info($"JSON sidecar written: {jsonPath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error("Failed to write JSON sidecar", ex);
+                        output.WriteNotable($"Warning: failed to write JSON sidecar ({ex.Message}). Text result and diagnostic log are unaffected.");
+                    }
                 }
 
                 exitCode = 0;
@@ -233,12 +274,17 @@ namespace MemoryUsageChecker
         /// Failures are logged and surfaced via <see cref="OutputWriter.WriteNotable"/>
         /// but never abort the analysis: stacks just show <c>[no symbols]</c>.
         /// </summary>
-        private static void LoadSymbols(OutputWriter output, IPendingResult<ISymbolDataSource> pendingSymbols, string symbolsOverride, bool noSymbols)
+        private static void LoadSymbols(OutputWriter output, IPendingResult<ISymbolDataSource> pendingSymbols, string symbolsOverride, bool noSymbols, JsonReport jsonReport)
         {
             if (noSymbols)
             {
                 output.WriteInfo("Symbols disabled (--no-symbols). Stack frames will show [no symbols].");
                 Log.Info("Symbol loading skipped because --no-symbols was specified.");
+                if (jsonReport != null)
+                {
+                    jsonReport.Symbols.Source = "Disabled (--no-symbols)";
+                    jsonReport.Symbols.Loaded = false;
+                }
                 return;
             }
 
@@ -246,6 +292,11 @@ namespace MemoryUsageChecker
             {
                 output.WriteNotable("Warning: symbol data source did not return a result. Stacks will show [no symbols].");
                 Log.Warn("pendingSymbols.HasResult = false; skipping symbol load.");
+                if (jsonReport != null)
+                {
+                    jsonReport.Symbols.Source = "(symbol data source did not return a result)";
+                    jsonReport.Symbols.Loaded = false;
+                }
                 return;
             }
 
@@ -278,18 +329,98 @@ namespace MemoryUsageChecker
 
             output.WriteInfo($"Symbol path: {symbolSource}");
             Log.Info($"Symbol source resolved to: {symbolSource}");
+            if (jsonReport != null)
+            {
+                jsonReport.Symbols.Source = symbolSource;
+            }
             using (Log.Scope("LoadSymbolsForConsoleAsync"))
             {
                 try
                 {
                     pendingSymbols.Result.LoadSymbolsForConsoleAsync(SymCachePath.Automatic, symbolPath).GetAwaiter().GetResult();
+                    if (jsonReport != null) jsonReport.Symbols.Loaded = true;
                 }
                 catch (Exception ex)
                 {
                     Log.Error("Symbol load failed", ex);
                     output.WriteNotable($"Warning: failed to load symbols ({ex.Message}). Stacks will show [no symbols].");
+                    if (jsonReport != null) jsonReport.Symbols.Loaded = false;
                 }
             }
+        }
+
+        /// <summary>
+        /// Populates the trace + data-sources blocks of the JSON report from
+        /// the resolved trace metadata. Mirrors <see cref="ImageFormatter.FormatOsHeader"/>
+        /// for the human OS-summary string, then captures the individual OS
+        /// fields (when the SDK exposes them) so consumers can match on
+        /// <c>osVersion</c> + <c>architecture</c> without parsing the
+        /// rendered string.
+        /// </summary>
+        private static void PopulateReportMetadata(
+            JsonReport jsonReport,
+            string tracePath,
+            ITraceMetadata metadata,
+            ISystemMetadata systemMetadata,
+            IPendingResult<IProcessDataSource> pendingProcesses,
+            IPendingResult<IResidentSetDataSource> pendingResidentSet,
+            IPendingResult<ICommitDataSource> pendingCommit,
+            IPendingResult<IHeapSnapshotDataSource> pendingHeap,
+            IPendingResult<IPoolAllocationDataSource> pendingPool,
+            IPendingResult<ISymbolDataSource> pendingSymbols)
+        {
+            if (jsonReport == null) return;
+
+            jsonReport.Trace.Path = tracePath;
+            try { jsonReport.Trace.SizeBytes = new FileInfo(tracePath).Length; } catch { /* best-effort */ }
+
+            try
+            {
+                jsonReport.Trace.StartTimeUtc = metadata.StartTime.UtcDateTime;
+                jsonReport.Trace.StopTimeUtc = metadata.StopTime.UtcDateTime;
+                jsonReport.Trace.DurationSeconds = (metadata.StopTime - metadata.StartTime).TotalSeconds;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"Could not populate trace times for JSON: {ex.Message}");
+            }
+
+            jsonReport.Trace.OsSummary = ImageFormatter.FormatOsHeader(metadata, systemMetadata);
+            jsonReport.Trace.OsVersion = ImageFormatter.SafeReadProperty(metadata, "OSVersion")
+                                       ?? ImageFormatter.SafeReadProperty(systemMetadata, "OSVersion");
+            jsonReport.Trace.OsBuildLab = ImageFormatter.SafeReadProperty(metadata, "OSBuildLab")
+                                        ?? ImageFormatter.SafeReadProperty(systemMetadata, "OSBuildLab");
+            jsonReport.Trace.Architecture = ImageFormatter.SafeReadProperty(metadata, "Architecture")
+                                          ?? ImageFormatter.SafeReadProperty(systemMetadata, "Architecture")
+                                          ?? ImageFormatter.SafeReadProperty(metadata, "ProcessorArchitecture")
+                                          ?? ImageFormatter.SafeReadProperty(systemMetadata, "ProcessorArchitecture");
+            jsonReport.Trace.MachineName = ImageFormatter.SafeReadProperty(metadata, "MachineName")
+                                         ?? ImageFormatter.SafeReadProperty(systemMetadata, "MachineName")
+                                         ?? ImageFormatter.SafeReadProperty(metadata, "ComputerName")
+                                         ?? ImageFormatter.SafeReadProperty(systemMetadata, "ComputerName");
+
+            jsonReport.DataSources.Processes   = new JsonReport.DataSourceState { HasResult = pendingProcesses.HasResult };
+            jsonReport.DataSources.ResidentSet = new JsonReport.DataSourceState
+            {
+                HasResult = pendingResidentSet.HasResult,
+                ItemCount = pendingResidentSet.HasResult ? pendingResidentSet.Result.Snapshots.Count : (long?)null
+            };
+            jsonReport.DataSources.Commit = new JsonReport.DataSourceState
+            {
+                HasResult = pendingCommit.HasResult,
+                ItemCount = pendingCommit.HasResult ? pendingCommit.Result.CommitLifetimes.Count : (long?)null
+            };
+            jsonReport.DataSources.Heap = new JsonReport.DataSourceState
+            {
+                HasResult = pendingHeap.HasResult,
+                ItemCount = pendingHeap.HasResult ? pendingHeap.Result.Snapshots.Count : (long?)null
+            };
+            jsonReport.DataSources.Pool = new JsonReport.DataSourceState
+            {
+                HasResult = pendingPool.HasResult,
+                ItemCount = pendingPool.HasResult ? pendingPool.Result.Intervals.Count : (long?)null
+            };
+            jsonReport.DataSources.Symbols = new JsonReport.DataSourceState { HasResult = pendingSymbols.HasResult };
         }
 
         /// <summary>Prints a one-line usage banner to stderr.</summary>
