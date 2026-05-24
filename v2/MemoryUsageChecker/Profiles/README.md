@@ -12,7 +12,20 @@
 
 ## 1. Capture a trace
 
-Open an **elevated** PowerShell or `cmd.exe` (WPR requires Administrator).
+### Option A — Click-and-run (recommended for new testers)
+
+Double-click **`Collect-MemoryUsageTrace.cmd`** in this folder. The script will:
+
+1. Prompt for Administrator elevation (WPR requires it).
+2. Confirm before cancelling any in-progress WPR session on the machine.
+3. Start the trace, then pause so you can reproduce your workload.
+4. Stop the trace and save it next to the script as `MemoryUsageChecker-YYYYMMDD-HHMMSS.etl`.
+
+A `.gitignore` in this folder keeps captured `.etl` files out of source control.
+
+### Option B — Manual `wpr` from a terminal
+
+Open an **elevated** PowerShell or `cmd.exe`:
 
 ```cmd
 :: 1. Start collecting (selects the Verbose profile shipped in this file)
@@ -33,6 +46,7 @@ wpr -stop MyTrace.etl
 > reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\<app.exe>" /v TracingFlags /t REG_DWORD /d 1 /f
 > ```
 >
+> Remove it after collection with `reg delete … /v TracingFlags /f`.
 > See the official guidance: <https://learn.microsoft.com/windows-hardware/test/wpt/heap-recording>
 
 ## 2. Analyze
