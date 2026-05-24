@@ -1,9 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
-		<TargetFramework>net8.0</TargetFramework>
+		<TargetFramework>net10.0</TargetFramework>
+		<RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+		<!-- Embed PDB into the assembly so published output is a single .exe. -->
+		<DebugType>embedded</DebugType>
 	</PropertyGroup>
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Windows.EventTracing" Version="2.0.679-preview" />
+		<PackageReference Include="Microsoft.Windows.EventTracing" Version="2.0.711-preview" />
 	</ItemGroup>
 </Project>
